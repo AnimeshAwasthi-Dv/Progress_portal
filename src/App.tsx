@@ -3,7 +3,9 @@ import {
   BriefcaseBusiness,
   ChevronDown,
   ClipboardList,
+  FileSpreadsheet,
   LayoutDashboard,
+  Link2,
   Menu,
   Plus,
   Search,
@@ -13,11 +15,15 @@ import {
 } from "lucide-react";
 import {
   createProjectAllotment,
+  getDailyProgressReports,
   getProjectAllotments,
+  saveDailyProgressReport,
   taskProgressOptions,
+  type DailyProgressReport,
   type ProjectAllotment,
   type TaskProgress,
   updateProjectAllotmentProgress,
+  updateProjectAllotmentRepository,
 } from "./api";
 
 const avatarColors = [
@@ -41,6 +47,13 @@ function initials(name: string) {
     .join("")
     .slice(0, 2)
     .toUpperCase();
+}
+
+function localDateString(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function SelectField({
@@ -85,6 +98,25 @@ function App() {
   const [isAddTaskOpen, setIsAddTaskOpen] = useState(false);
   const [isSavingTask, setIsSavingTask] = useState(false);
   const [taskError, setTaskError] = useState("");
+  const [reportDate, setReportDate] = useState(localDateString);
+  const [dailyReports, setDailyReports] = useState<DailyProgressReport[]>([]);
+  const [reportError, setReportError] = useState("");
+  const [reportLoadError, setReportLoadError] = useState("");
+  const [isLoadingReports, setIsLoadingReports] = useState(true);
+  const [isReportEditorOpen, setIsReportEditorOpen] = useState(false);
+  const [isSavingReport, setIsSavingReport] = useState(false);
+  const [repositoryEditor, setRepositoryEditor] = useState<{
+    allotment: ProjectAllotment;
+    url: string;
+  } | null>(null);
+  const [repositoryError, setRepositoryError] = useState("");
+  const [isSavingRepository, setIsSavingRepository] = useState(false);
+  const [reportForm, setReportForm] = useState({
+    employeeName: "",
+    completedToday: "",
+    plansNext: "",
+    blockers: "",
+  });
   const [newTeamMemberName, setNewTeamMemberName] = useState("");
   const [taskForm, setTaskForm] = useState({
     employeeNames: [] as string[],
@@ -92,6 +124,7 @@ function App() {
     taskAssigned: "",
     assignedBy: "",
     progress: "Not Started" as TaskProgress,
+    repositoryUrl: "",
   });
 
   useEffect(() => {
@@ -117,6 +150,32 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let isActive = true;
+    setIsLoadingReports(true);
+    setDailyReports([]);
+    setReportLoadError("");
+
+    getDailyProgressReports(reportDate)
+      .then((reports) => {
+        if (isActive) setDailyReports(reports);
+      })
+      .catch((error: unknown) => {
+        if (isActive) {
+          setReportLoadError(
+            error instanceof Error ? error.message : "Could not load daily progress reports.",
+          );
+        }
+      })
+      .finally(() => {
+        if (isActive) setIsLoadingReports(false);
+      });
+
+    return () => {
+      isActive = false;
+    };
+  }, [reportDate]);
+
   const employees = useMemo(
     () => [...new Set(allotments.map((allotment) => allotment.employeeName))],
     [allotments],
@@ -136,6 +195,7 @@ function App() {
           allotment.taskAssigned,
           allotment.assignedBy,
           allotment.progress,
+          allotment.repositoryUrl ?? "",
         ]
           .join(" ")
           .toLowerCase()
@@ -159,10 +219,72 @@ function App() {
       taskAssigned: "",
       assignedBy: "",
       progress: "Not Started",
+      repositoryUrl: "",
     });
     setNewTeamMemberName("");
     setTaskError("");
     setIsAddTaskOpen(true);
+  };
+
+  const openReportEditor = (employeeName: string) => {
+    const existing = dailyReports.find((report) => report.employeeName === employeeName);
+    setReportForm({
+      employeeName,
+      completedToday: existing?.completedToday ?? "",
+      plansNext: existing?.plansNext ?? "",
+      blockers: existing?.blockers ?? "",
+    });
+    setReportError("");
+    setIsReportEditorOpen(true);
+  };
+
+  const handleSaveReport = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setReportError("");
+    setIsSavingReport(true);
+    try {
+      const saved = await saveDailyProgressReport({
+        ...reportForm,
+        reportDate,
+      });
+      setDailyReports((current) => [
+        ...current.filter((report) => report.employeeName !== saved.employeeName),
+        saved,
+      ].sort((left, right) => left.employeeName.localeCompare(right.employeeName)));
+      setIsReportEditorOpen(false);
+    } catch (error) {
+      setReportError(error instanceof Error ? error.message : "Could not save this daily report.");
+    } finally {
+      setIsSavingReport(false);
+    }
+  };
+
+  const openRepositoryEditor = (allotment: ProjectAllotment) => {
+    setRepositoryEditor({ allotment, url: allotment.repositoryUrl ?? "" });
+    setRepositoryError("");
+  };
+
+  const handleSaveRepository = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!repositoryEditor) return;
+    setRepositoryError("");
+    setIsSavingRepository(true);
+    try {
+      const updated = await updateProjectAllotmentRepository(
+        repositoryEditor.allotment.id,
+        repositoryEditor.url.trim(),
+      );
+      setAllotments((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setRepositoryEditor(null);
+    } catch (error) {
+      setRepositoryError(
+        error instanceof Error ? error.message : "Could not save this repository link.",
+      );
+    } finally {
+      setIsSavingRepository(false);
+    }
   };
 
   const toggleTaskAssignee = (employeeName: string) => {
@@ -218,6 +340,7 @@ function App() {
         taskAssigned: taskForm.taskAssigned.trim(),
         assignedBy: taskForm.assignedBy.trim(),
         progress: taskForm.progress,
+        repositoryUrl: taskForm.repositoryUrl.trim(),
       });
       setAllotments((current) => [...current, ...created]);
       setIsAddTaskOpen(false);
@@ -319,6 +442,16 @@ function App() {
             <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-500">
               {isLoading ? "…" : employees.length}
             </span>
+          </button>
+          <button
+            onClick={() => {
+              closeMobileMenu();
+              document.getElementById("daily-reports")?.scrollIntoView({ behavior: "smooth" });
+            }}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-semibold text-slate-500 transition hover:bg-slate-50 hover:text-slate-800"
+          >
+            <FileSpreadsheet className="h-[18px] w-[18px]" />
+            Daily Reports
           </button>
         </nav>
 
@@ -445,15 +578,16 @@ function App() {
             ))}
           </section>
 
-          <section className="overflow-hidden rounded-xl border border-slate-200/80 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
-            <div className="flex flex-col gap-4 border-b border-slate-100 px-5 py-5 sm:px-6 md:flex-row md:items-center md:justify-between">
+          <section className="overflow-hidden rounded-lg border border-[#a8c7a0] bg-white shadow-[0_2px_8px_rgba(30,70,30,0.08)]">
+            <div className="flex flex-col gap-4 border-b border-[#c5d8c1] bg-[#f5f9f4] px-5 py-5 sm:px-6 md:flex-row md:items-center md:justify-between">
               <div>
-                <h2 className="font-display text-base font-bold tracking-tight text-slate-900">
-                  Project Allotments
-                </h2>
-                <p className="mt-1 text-xs text-slate-500">
-                  Assigned work across the Technical Team.
-                </p>
+                <div className="flex items-center gap-2">
+                  <FileSpreadsheet className="h-4 w-4 text-[#217346]" />
+                  <h2 className="font-display text-base font-bold tracking-tight text-slate-900">
+                    Task worksheet
+                  </h2>
+                </div>
+                <p className="mt-1 text-xs text-slate-500">Technical Team · Project allotments</p>
               </div>
               <div className="flex flex-wrap items-center gap-2.5">
                 <span className="text-xs font-medium text-slate-500">Employee</span>
@@ -474,24 +608,32 @@ function App() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[960px] border-collapse text-left">
+              <table className="w-full min-w-[1180px] border-collapse text-left">
                 <thead>
+                  <tr className="bg-[#f1f5f0] text-center text-[10px] font-semibold text-[#688064]">
+                    {["A", "B", "C", "D", "E", "F", "G"].map((column) => (
+                      <th key={column} className="border border-[#d7e1d4] px-2 py-1.5">
+                        {column}
+                      </th>
+                    ))}
+                  </tr>
                   <tr className="bg-slate-50/70 text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-400">
-                    <th className="w-24 px-6 py-3.5">Sr. No.</th>
-                    <th className="w-48 px-5 py-3.5">Name</th>
-                    <th className="w-[30%] px-5 py-3.5">Project</th>
-                    <th className="px-5 py-3.5">Task Assigned</th>
-                    <th className="px-5 py-3.5">Progress</th>
-                    <th className="px-5 py-3.5">Assigned By</th>
+                    <th className="w-24 border border-[#d7e1d4] bg-[#e9f1e7] px-6 py-3.5">Sr. No.</th>
+                    <th className="w-48 border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Name</th>
+                    <th className="w-[22%] border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Project</th>
+                    <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Task Assigned</th>
+                    <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Progress</th>
+                    <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Assigned By</th>
+                    <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Git Repository</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody>
                   {filteredAllotments.map((allotment) => (
-                    <tr key={allotment.id} className="align-top transition hover:bg-slate-50/60">
-                      <td className="whitespace-nowrap px-6 py-4 text-sm text-slate-400">
+                    <tr key={allotment.id} className="align-top transition hover:bg-[#f4f8f2]">
+                      <td className="whitespace-nowrap border border-[#e0e8dd] bg-[#f6f8f5] px-6 py-4 text-sm text-slate-400">
                         {allotment.serialNumber}
                       </td>
-                      <td className="whitespace-nowrap px-5 py-4">
+                      <td className="whitespace-nowrap border border-[#e0e8dd] px-5 py-4">
                         <button
                           className="flex items-center gap-3 text-left"
                           onClick={() => setSelectedEmployee(allotment.employeeName)}
@@ -507,13 +649,13 @@ function App() {
                           </span>
                         </button>
                       </td>
-                      <td className="px-5 py-4 text-sm font-semibold leading-6 text-slate-700">
+                      <td className="border border-[#e0e8dd] px-5 py-4 text-sm font-semibold leading-6 text-slate-700">
                         {allotment.project}
                       </td>
-                      <td className="px-5 py-4 text-sm leading-6 text-slate-600">
+                      <td className="border border-[#e0e8dd] px-5 py-4 text-sm leading-6 text-slate-600">
                         {allotment.taskAssigned}
                       </td>
-                      <td className="whitespace-nowrap px-5 py-4">
+                      <td className="whitespace-nowrap border border-[#e0e8dd] px-5 py-4">
                         <div className="flex flex-col items-start gap-1.5">
                           <span
                             className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${progressStyles[allotment.progress]}`}
@@ -538,21 +680,45 @@ function App() {
                           </select>
                         </div>
                       </td>
-                      <td className="whitespace-nowrap px-5 py-4 text-sm text-slate-500">
+                      <td className="whitespace-nowrap border border-[#e0e8dd] px-5 py-4 text-sm text-slate-500">
                         {allotment.assignedBy}
+                      </td>
+                      <td className="border border-[#e0e8dd] px-5 py-4 text-sm">
+                        <div className="flex items-center gap-2">
+                          {allotment.repositoryUrl ? (
+                            <a
+                              href={allotment.repositoryUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex max-w-[190px] items-center gap-1.5 truncate font-medium text-[#217346] hover:underline"
+                              title={allotment.repositoryUrl}
+                            >
+                              <Link2 className="h-3.5 w-3.5 shrink-0" />
+                              <span className="truncate">{allotment.repositoryUrl}</span>
+                            </a>
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                          <button
+                            onClick={() => openRepositoryEditor(allotment)}
+                            className="shrink-0 rounded px-1.5 py-1 text-[11px] font-semibold text-[#217346] hover:bg-[#edf5eb]"
+                          >
+                            {allotment.repositoryUrl ? "Edit" : "Add link"}
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
                   {isLoading && (
                     <tr>
-                      <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-400">
+                      <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-400">
                         Loading project allotments from PostgreSQL…
                       </td>
                     </tr>
                   )}
                   {!isLoading && filteredAllotments.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-6 py-12 text-center">
+                      <td colSpan={7} className="px-6 py-12 text-center">
                         {loadError ? (
                           <p className="text-sm font-semibold text-slate-600">
                             Project allotment data is unavailable.
@@ -574,7 +740,7 @@ function App() {
                 </tbody>
               </table>
             </div>
-            <div className="flex flex-col gap-2 border-t border-slate-100 px-5 py-3.5 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+            <div className="flex flex-col gap-2 border-t border-[#d7e1d4] bg-[#f8faf7] px-5 py-3.5 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <span>
                 Showing{" "}
                 <span className="font-semibold text-slate-600">
@@ -587,6 +753,108 @@ function App() {
                 task assignments
               </span>
               <span>Department: Technical</span>
+            </div>
+          </section>
+
+          <section id="daily-reports" className="scroll-mt-24 pt-9">
+            <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+              <div>
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold text-[#217346]">
+                  <FileSpreadsheet className="h-4 w-4" />
+                  DAILY CHECK-IN
+                </div>
+                <h2 className="font-display text-xl font-bold tracking-tight text-slate-900">
+                  Daily progress reports
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  One update per team member for each day. Members can revise their own entry.
+                </p>
+              </div>
+              <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                Report date
+                <input
+                  type="date"
+                  aria-label="Daily report date"
+                  value={reportDate}
+                  onChange={(event) => setReportDate(event.target.value)}
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 outline-none focus:border-[#217346] focus:ring-4 focus:ring-emerald-100"
+                />
+              </label>
+            </div>
+
+            {reportLoadError && (
+              <div role="alert" className="mb-3 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+                Could not load daily reports: {reportLoadError}
+              </div>
+            )}
+
+            <div className="overflow-x-auto rounded-lg border border-[#a8c7a0] bg-white shadow-[0_2px_8px_rgba(30,70,30,0.06)]">
+              <table className="w-full min-w-[900px] border-collapse text-left">
+                <thead>
+                  <tr className="bg-[#e9f1e7] text-[11px] font-semibold uppercase tracking-[0.08em] text-slate-600">
+                    <th className="border border-[#d7e1d4] px-4 py-3">Team member</th>
+                    <th className="border border-[#d7e1d4] px-4 py-3">Completed today</th>
+                    <th className="border border-[#d7e1d4] px-4 py-3">Next</th>
+                    <th className="border border-[#d7e1d4] px-4 py-3">Blockers</th>
+                    <th className="border border-[#d7e1d4] px-4 py-3">Report status</th>
+                    <th className="border border-[#d7e1d4] px-4 py-3">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {employees.map((employee) => {
+                    const report = dailyReports.find((item) => item.employeeName === employee);
+                    return (
+                      <tr key={employee} className="align-top hover:bg-[#f4f8f2]">
+                        <td className="border border-[#e0e8dd] px-4 py-3 text-sm font-semibold text-slate-700">
+                          {employee}
+                        </td>
+                        <td className="max-w-[280px] border border-[#e0e8dd] px-4 py-3 text-sm leading-5 text-slate-600">
+                          {report?.completedToday ?? <span className="text-slate-300">—</span>}
+                        </td>
+                        <td className="max-w-[220px] border border-[#e0e8dd] px-4 py-3 text-sm leading-5 text-slate-600">
+                          {report?.plansNext ?? <span className="text-slate-300">—</span>}
+                        </td>
+                        <td className="max-w-[220px] border border-[#e0e8dd] px-4 py-3 text-sm leading-5 text-slate-600">
+                          {report?.blockers || <span className="text-slate-300">—</span>}
+                        </td>
+                        <td className="whitespace-nowrap border border-[#e0e8dd] px-4 py-3">
+                          <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${
+                            report ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"
+                          }`}>
+                            {report ? "Submitted" : "Not submitted"}
+                          </span>
+                        </td>
+                        <td className="whitespace-nowrap border border-[#e0e8dd] px-4 py-3">
+                          <button
+                            onClick={() => openReportEditor(employee)}
+                            disabled={isLoadingReports}
+                            className="rounded-md border border-[#b5cdb0] px-3 py-1.5 text-xs font-semibold text-[#217346] transition hover:bg-[#edf5eb] disabled:cursor-wait disabled:opacity-50"
+                          >
+                            {report ? "Edit report" : "Add report"}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!isLoading && employees.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-10 text-center text-sm text-slate-400">
+                        Add a task assignment to get team members listed here.
+                      </td>
+                    </tr>
+                  )}
+                  {isLoadingReports && (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-8 text-center text-sm text-slate-400">
+                        Loading reports…
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+              <div className="border-t border-[#d7e1d4] bg-[#f8faf7] px-4 py-2.5 text-xs text-slate-500">
+                {isLoadingReports ? "Loading…" : `${dailyReports.length} of ${employees.length} reports submitted`}
+              </div>
             </div>
           </section>
 
@@ -702,6 +970,17 @@ function App() {
                   <p className="mt-3 text-xs text-slate-500">
                     Assigned by <span className="font-semibold text-slate-700">{assignment.assignedBy}</span>
                   </p>
+                  {assignment.repositoryUrl && (
+                    <a
+                      href={assignment.repositoryUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-[#217346] hover:underline"
+                    >
+                      <Link2 className="h-3.5 w-3.5" />
+                      Open Git repository
+                    </a>
+                  )}
                 </article>
               ))}
             </div>
@@ -713,6 +992,188 @@ function App() {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {isReportEditorOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/40 p-4 backdrop-blur-[2px]"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !isSavingReport) setIsReportEditorOpen(false);
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="daily-report-title"
+            className="my-auto w-full max-w-[560px] rounded-2xl border border-slate-200/80 bg-white shadow-xl shadow-slate-900/10"
+          >
+            <div className="flex items-start justify-between border-b border-slate-100 px-6 py-5">
+              <div>
+                <h2 id="daily-report-title" className="font-display text-lg font-bold text-slate-900">
+                  Daily report · {reportForm.employeeName}
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">{reportDate}</p>
+              </div>
+              <button
+                aria-label="Close report editor"
+                disabled={isSavingReport}
+                onClick={() => setIsReportEditorOpen(false)}
+                className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
+              >
+                <X className="h-[18px] w-[18px]" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveReport} className="space-y-4 p-6">
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-semibold text-slate-600">
+                  What did you complete today?
+                </span>
+                <textarea
+                  required
+                  maxLength={4000}
+                  rows={4}
+                  value={reportForm.completedToday}
+                  onChange={(event) =>
+                    setReportForm({ ...reportForm, completedToday: event.target.value })
+                  }
+                  placeholder="Summarize today's progress"
+                  className="form-control h-auto min-h-[96px] resize-y py-2.5"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-semibold text-slate-600">
+                  What will you work on next?
+                </span>
+                <textarea
+                  maxLength={4000}
+                  rows={3}
+                  value={reportForm.plansNext}
+                  onChange={(event) =>
+                    setReportForm({ ...reportForm, plansNext: event.target.value })
+                  }
+                  placeholder="Planned work for the next day"
+                  className="form-control h-auto min-h-[76px] resize-y py-2.5"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-semibold text-slate-600">
+                  Blockers <span className="font-normal text-slate-400">(optional)</span>
+                </span>
+                <textarea
+                  maxLength={4000}
+                  rows={2}
+                  value={reportForm.blockers}
+                  onChange={(event) =>
+                    setReportForm({ ...reportForm, blockers: event.target.value })
+                  }
+                  placeholder="Any issue stopping progress?"
+                  className="form-control h-auto min-h-[64px] resize-y py-2.5"
+                />
+              </label>
+              {reportError && (
+                <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  Could not save report: {reportError}
+                </p>
+              )}
+              <div className="flex justify-end gap-2.5 border-t border-slate-100 pt-5">
+                <button
+                  type="button"
+                  disabled={isSavingReport}
+                  onClick={() => setIsReportEditorOpen(false)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingReport}
+                  className="rounded-lg bg-[#217346] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#185c37] focus:outline-none focus:ring-4 focus:ring-emerald-100 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {isSavingReport ? "Saving…" : "Save report"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {repositoryEditor && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/40 p-4 backdrop-blur-[2px]"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !isSavingRepository) {
+              setRepositoryEditor(null);
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="repository-title"
+            className="my-auto w-full max-w-[520px] rounded-2xl border border-slate-200/80 bg-white shadow-xl shadow-slate-900/10"
+          >
+            <div className="flex items-start justify-between border-b border-slate-100 px-6 py-5">
+              <div>
+                <h2 id="repository-title" className="font-display text-lg font-bold text-slate-900">
+                  Git repository
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {repositoryEditor.allotment.project} · {repositoryEditor.allotment.employeeName}
+                </p>
+              </div>
+              <button
+                aria-label="Close repository editor"
+                disabled={isSavingRepository}
+                onClick={() => setRepositoryEditor(null)}
+                className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
+              >
+                <X className="h-[18px] w-[18px]" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveRepository} className="space-y-4 p-6">
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-semibold text-slate-600">
+                  Repository URL <span className="font-normal text-slate-400">(optional)</span>
+                </span>
+                <input
+                  type="url"
+                  maxLength={2048}
+                  value={repositoryEditor.url}
+                  onChange={(event) =>
+                    setRepositoryEditor({ ...repositoryEditor, url: event.target.value })
+                  }
+                  placeholder="https://github.com/organization/repository"
+                  className="form-control"
+                />
+                <span className="mt-1 block text-[11px] text-slate-400">
+                  Clear the URL and save to remove the current link.
+                </span>
+              </label>
+              {repositoryError && (
+                <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  Could not save repository link: {repositoryError}
+                </p>
+              )}
+              <div className="flex justify-end gap-2.5 border-t border-slate-100 pt-5">
+                <button
+                  type="button"
+                  disabled={isSavingRepository}
+                  onClick={() => setRepositoryEditor(null)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingRepository}
+                  className="rounded-lg bg-[#217346] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#185c37] focus:outline-none focus:ring-4 focus:ring-emerald-100 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {isSavingRepository ? "Saving…" : "Save link"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -857,6 +1318,22 @@ function App() {
                   }
                   placeholder="Describe the task"
                   className="form-control h-auto min-h-[104px] resize-y py-2.5"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1.5 block text-xs font-semibold text-slate-600">
+                  Git repository link <span className="font-normal text-slate-400">(optional)</span>
+                </span>
+                <input
+                  type="url"
+                  maxLength={2048}
+                  value={taskForm.repositoryUrl}
+                  onChange={(event) =>
+                    setTaskForm({ ...taskForm, repositoryUrl: event.target.value })
+                  }
+                  placeholder="https://github.com/organization/repository"
+                  className="form-control"
                 />
               </label>
 

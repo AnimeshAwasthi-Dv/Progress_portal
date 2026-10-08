@@ -83,6 +83,10 @@ export async function initializeDatabase() {
       ADD COLUMN IF NOT EXISTS progress TEXT NOT NULL DEFAULT 'Not Started'
     `);
     await client.query(`
+      ALTER TABLE project_allotments
+      ADD COLUMN IF NOT EXISTS repository_url TEXT
+    `);
+    await client.query(`
       DO $$
       BEGIN
         IF NOT EXISTS (
@@ -97,6 +101,19 @@ export async function initializeDatabase() {
         END IF;
       END
       $$
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS daily_progress_reports (
+        id SERIAL PRIMARY KEY,
+        employee_name TEXT NOT NULL CHECK (length(trim(employee_name)) > 0),
+        report_date DATE NOT NULL,
+        completed_today TEXT NOT NULL CHECK (length(trim(completed_today)) > 0),
+        plans_next TEXT NOT NULL DEFAULT '',
+        blockers TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (employee_name, report_date)
+      )
     `);
 
     for (const allotment of seedProjectAllotments) {
@@ -130,6 +147,7 @@ export type ProjectAllotment = {
   taskAssigned: string;
   assignedBy: string;
   progress: TaskProgress;
+  repositoryUrl: string | null;
 };
 
 export type TaskProgress = "Not Started" | "In Progress" | "Blocked" | "Completed";
@@ -143,7 +161,8 @@ export async function listProjectAllotments() {
       project,
       task_assigned AS "taskAssigned",
       assigned_by AS "assignedBy",
-      progress
+      progress,
+      repository_url AS "repositoryUrl"
     FROM project_allotments
     ORDER BY serial_number, id
   `);
@@ -156,6 +175,7 @@ export async function createProjectAllotments(input: {
   taskAssigned: string;
   assignedBy: string;
   progress: TaskProgress;
+  repositoryUrl: string | null;
 }) {
   const client = await pool.connect();
 
@@ -185,8 +205,8 @@ export async function createProjectAllotments(input: {
 
       const inserted = await client.query<ProjectAllotment>(
         `INSERT INTO project_allotments
-           (serial_number, employee_name, project, task_assigned, assigned_by, progress)
-         VALUES ($1, $2, $3, $4, $5, $6)
+           (serial_number, employee_name, project, task_assigned, assigned_by, progress, repository_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (serial_number, employee_name, project, task_assigned) DO NOTHING
          RETURNING
            id,
@@ -195,7 +215,8 @@ export async function createProjectAllotments(input: {
            project,
            task_assigned AS "taskAssigned",
            assigned_by AS "assignedBy",
-           progress`,
+           progress,
+           repository_url AS "repositoryUrl"`,
         [
           serialNumber,
           employeeName,
@@ -203,6 +224,7 @@ export async function createProjectAllotments(input: {
           input.taskAssigned,
           input.assignedBy,
           input.progress,
+          input.repositoryUrl,
         ],
       );
       created.push(...inserted.rows);
@@ -235,10 +257,87 @@ export async function updateProjectAllotmentProgress(id: number, progress: TaskP
        project,
        task_assigned AS "taskAssigned",
        assigned_by AS "assignedBy",
-       progress`,
+       progress,
+       repository_url AS "repositoryUrl"`,
     [id, progress],
   );
   return rows[0] ?? null;
+}
+
+export async function updateProjectAllotmentRepository(id: number, repositoryUrl: string | null) {
+  const { rows } = await pool.query<ProjectAllotment>(
+    `UPDATE project_allotments
+     SET repository_url = $2, updated_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       serial_number AS "serialNumber",
+       employee_name AS "employeeName",
+       project,
+       task_assigned AS "taskAssigned",
+       assigned_by AS "assignedBy",
+       progress,
+       repository_url AS "repositoryUrl"`,
+    [id, repositoryUrl],
+  );
+  return rows[0] ?? null;
+}
+
+export type DailyProgressReport = {
+  id: number;
+  employeeName: string;
+  reportDate: string;
+  completedToday: string;
+  plansNext: string;
+  blockers: string;
+};
+
+export type DailyProgressReportInput = Omit<DailyProgressReport, "id">;
+
+export async function listDailyProgressReports(reportDate: string) {
+  const { rows } = await pool.query<DailyProgressReport>(
+    `SELECT
+       id,
+       employee_name AS "employeeName",
+       to_char(report_date, 'YYYY-MM-DD') AS "reportDate",
+       completed_today AS "completedToday",
+       plans_next AS "plansNext",
+       blockers
+     FROM daily_progress_reports
+     WHERE report_date = $1::date
+     ORDER BY employee_name`,
+    [reportDate],
+  );
+  return rows;
+}
+
+export async function saveDailyProgressReport(input: DailyProgressReportInput) {
+  const { rows } = await pool.query<DailyProgressReport>(
+    `INSERT INTO daily_progress_reports
+       (employee_name, report_date, completed_today, plans_next, blockers)
+     VALUES ($1, $2::date, $3, $4, $5)
+     ON CONFLICT (employee_name, report_date)
+     DO UPDATE SET
+       completed_today = EXCLUDED.completed_today,
+       plans_next = EXCLUDED.plans_next,
+       blockers = EXCLUDED.blockers,
+       updated_at = NOW()
+     RETURNING
+       id,
+       employee_name AS "employeeName",
+       to_char(report_date, 'YYYY-MM-DD') AS "reportDate",
+       completed_today AS "completedToday",
+       plans_next AS "plansNext",
+       blockers`,
+    [
+      input.employeeName,
+      input.reportDate,
+      input.completedToday,
+      input.plansNext,
+      input.blockers,
+    ],
+  );
+  return rows[0];
 }
 
 export async function listEmployees() {

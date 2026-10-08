@@ -16,7 +16,9 @@ Internal team dashboard backed by a local PostgreSQL database.
 
 The development command starts the Vite frontend and the local API. The API listens on `127.0.0.1:3001`; Vite proxies `/api` requests to it.
 
-On startup, the API creates the `employees` and `project_allotments` tables when missing, and adds missing assignment fields without changing existing employee data. Project allotments are inserted idempotently from `server/seedProjectAllotments.ts`. The dashboard shows each task's employee, project, assigned work, progress, and assigner. Use **Add Task** to assign a task to one or more team members and choose its initial progress. Update progress from the status control in the task table; progress changes are saved to PostgreSQL. Existing tasks receive the initial progress value `Not Started`.
+On startup, the API creates the `employees`, `project_allotments`, and `daily_progress_reports` tables when missing, and adds missing assignment fields without changing existing employee data. Project allotments are inserted idempotently from `server/seedProjectAllotments.ts`. The home dashboard presents the task register as a spreadsheet-style worksheet with employee, project, assigned work, progress, assigner, and optional Git repository link. Use **Add Task** to assign a task to one or more team members and choose its initial progress. Add or edit a Git repository URL from any task row. Update progress from the status control in the task table; progress changes are saved to PostgreSQL. Existing tasks receive the initial progress value `Not Started`.
+
+Use **Daily Reports** to review one report row per team member for a selected date. Each person can submit completed work, the next work planned, and optional blockers; a person's report can be edited for that date. Reports are stored by employee and date. Daily reports are check-ins attributed to the selected team member; this app does not currently require individual sign-in.
 
 ## Build
 

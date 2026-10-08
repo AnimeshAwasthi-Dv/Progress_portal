@@ -5,8 +5,12 @@ import {
   createEmployee,
   initializeDatabase,
   listEmployees,
+  listDailyProgressReports,
   listProjectAllotments,
+  saveDailyProgressReport,
   updateEmployee,
+  updateProjectAllotmentRepository,
+  type DailyProgressReportInput,
   type EmployeeInput,
   type TaskProgress,
   type WorkStatus,
@@ -52,6 +56,7 @@ function parseProjectAllotmentInput(
   taskAssigned: string;
   assignedBy: string;
   progress: TaskProgress;
+  repositoryUrl: string | null;
 } | null {
   if (typeof body !== "object" || body === null) return null;
 
@@ -66,6 +71,19 @@ function parseProjectAllotmentInput(
   const taskAssigned = typeof data.taskAssigned === "string" ? data.taskAssigned.trim() : "";
   const assignedBy = typeof data.assignedBy === "string" ? data.assignedBy.trim() : "";
   const progress = data.progress;
+  const repositoryUrl =
+    typeof data.repositoryUrl === "string" && data.repositoryUrl.trim()
+      ? data.repositoryUrl.trim()
+      : null;
+  let isValidRepositoryUrl = repositoryUrl === null;
+  if (repositoryUrl) {
+    try {
+      const parsedUrl = new URL(repositoryUrl);
+      isValidRepositoryUrl = ["http:", "https:"].includes(parsedUrl.protocol);
+    } catch {
+      isValidRepositoryUrl = false;
+    }
+  }
 
   if (
     employeeNames.length === 0 ||
@@ -78,12 +96,55 @@ function parseProjectAllotmentInput(
     !taskProgressOptions.includes(progress as TaskProgress) ||
     project.length > 240 ||
     assignedBy.length > 120 ||
-    taskAssigned.length > 4000
+    taskAssigned.length > 4000 ||
+    (data.repositoryUrl !== undefined &&
+      data.repositoryUrl !== null &&
+      typeof data.repositoryUrl !== "string") ||
+    (repositoryUrl !== null && repositoryUrl.length > 2048) ||
+    !isValidRepositoryUrl
   ) {
     return null;
   }
 
-  return { employeeNames, project, taskAssigned, assignedBy, progress: progress as TaskProgress };
+  return {
+    employeeNames,
+    project,
+    taskAssigned,
+    assignedBy,
+    progress: progress as TaskProgress,
+    repositoryUrl,
+  };
+}
+
+function isValidDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+function parseDailyProgressReportInput(body: unknown): DailyProgressReportInput | null {
+  if (typeof body !== "object" || body === null) return null;
+  const data = body as Record<string, unknown>;
+  const employeeName = typeof data.employeeName === "string" ? data.employeeName.trim() : "";
+  const reportDate = typeof data.reportDate === "string" ? data.reportDate : "";
+  const completedToday =
+    typeof data.completedToday === "string" ? data.completedToday.trim() : "";
+  const plansNext = typeof data.plansNext === "string" ? data.plansNext.trim() : "";
+  const blockers = typeof data.blockers === "string" ? data.blockers.trim() : "";
+
+  if (
+    !employeeName ||
+    employeeName.length > 120 ||
+    !isValidDate(reportDate) ||
+    !completedToday ||
+    completedToday.length > 4000 ||
+    plansNext.length > 4000 ||
+    blockers.length > 4000
+  ) {
+    return null;
+  }
+
+  return { employeeName, reportDate, completedToday, plansNext, blockers };
 }
 
 function asyncRoute(
@@ -105,6 +166,32 @@ app.get(
   "/api/project-allotments",
   asyncRoute(async (_request, response) => {
     response.json(await listProjectAllotments());
+  }),
+);
+
+app.get(
+  "/api/daily-reports",
+  asyncRoute(async (request, response) => {
+    const reportDate = request.query.date;
+    if (typeof reportDate !== "string" || !isValidDate(reportDate)) {
+      response.status(400).json({ error: "Provide a valid report date in YYYY-MM-DD format." });
+      return;
+    }
+    response.json(await listDailyProgressReports(reportDate));
+  }),
+);
+
+app.put(
+  "/api/daily-reports",
+  asyncRoute(async (request, response) => {
+    const report = parseDailyProgressReportInput(request.body);
+    if (!report) {
+      response.status(400).json({
+        error: "Provide a team member, valid report date, and completed work within the allowed lengths.",
+      });
+      return;
+    }
+    response.json(await saveDailyProgressReport(report));
   }),
 );
 
@@ -146,6 +233,54 @@ app.patch(
     }
 
     const updated = await updateProjectAllotmentProgress(id, progress as TaskProgress);
+    if (!updated) {
+      response.status(404).json({ error: "Task assignment not found." });
+      return;
+    }
+    response.json(updated);
+  }),
+);
+
+app.patch(
+  "/api/project-allotments/:id/repository",
+  asyncRoute(async (request, response) => {
+    const id = Number(request.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) {
+      response.status(400).json({ error: "Task ID must be a positive integer." });
+      return;
+    }
+
+    const repositoryUrl = (request.body as Record<string, unknown> | null)?.repositoryUrl;
+    if (
+      repositoryUrl !== null &&
+      repositoryUrl !== undefined &&
+      typeof repositoryUrl !== "string"
+    ) {
+      response.status(400).json({ error: "Provide a valid HTTP or HTTPS repository link." });
+      return;
+    }
+    const normalizedUrl =
+      typeof repositoryUrl === "string" && repositoryUrl.trim()
+        ? repositoryUrl.trim()
+        : null;
+    if (normalizedUrl && normalizedUrl.length > 2048) {
+      response.status(400).json({ error: "Repository links must be 2048 characters or fewer." });
+      return;
+    }
+    if (normalizedUrl) {
+      try {
+        const parsedUrl = new URL(normalizedUrl);
+        if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+          response.status(400).json({ error: "Repository links must use HTTP or HTTPS." });
+          return;
+        }
+      } catch {
+        response.status(400).json({ error: "Provide a valid HTTP or HTTPS repository link." });
+        return;
+      }
+    }
+
+    const updated = await updateProjectAllotmentRepository(id, normalizedUrl);
     if (!updated) {
       response.status(404).json({ error: "Task assignment not found." });
       return;

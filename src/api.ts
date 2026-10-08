@@ -25,6 +25,7 @@ export type ProjectAllotment = {
   taskAssigned: string;
   assignedBy: string;
   progress: TaskProgress;
+  repositoryUrl: string | null;
 };
 
 export type NewProjectAllotment = {
@@ -33,7 +34,32 @@ export type NewProjectAllotment = {
   taskAssigned: string;
   assignedBy: string;
   progress: TaskProgress;
+  repositoryUrl: string;
 };
+
+export type DailyProgressReport = {
+  id: number;
+  employeeName: string;
+  reportDate: string;
+  completedToday: string;
+  plansNext: string;
+  blockers: string;
+};
+
+export type NewDailyProgressReport = Omit<DailyProgressReport, "id">;
+
+export function getDailyProgressReports(reportDate: string) {
+  return request<DailyProgressReport[]>(
+    `/api/daily-reports?date=${encodeURIComponent(reportDate)}`,
+  );
+}
+
+export function saveDailyProgressReport(report: NewDailyProgressReport) {
+  return request<DailyProgressReport>("/api/daily-reports", {
+    method: "PUT",
+    body: JSON.stringify(report),
+  });
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -78,6 +104,13 @@ export function updateProjectAllotmentProgress(id: number, progress: TaskProgres
   return request<ProjectAllotment>(`/api/project-allotments/${id}/progress`, {
     method: "PATCH",
     body: JSON.stringify({ progress }),
+  });
+}
+
+export function updateProjectAllotmentRepository(id: number, repositoryUrl: string) {
+  return request<ProjectAllotment>(`/api/project-allotments/${id}/repository`, {
+    method: "PATCH",
+    body: JSON.stringify({ repositoryUrl }),
   });
 }
 
