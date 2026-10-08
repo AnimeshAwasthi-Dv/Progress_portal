@@ -23,7 +23,7 @@ export type ProjectAllotment = {
   employeeName: string;
   project: string;
   taskAssigned: string;
-  assignedBy: string;
+  assistanceBy: string[];
   progress: TaskProgress;
   repositoryUrl: string | null;
 };
@@ -32,7 +32,7 @@ export type NewProjectAllotment = {
   employeeNames: string[];
   project: string;
   taskAssigned: string;
-  assignedBy: string;
+  assistanceBy: string[];
   progress: TaskProgress;
   repositoryUrl: string;
 };
@@ -111,6 +111,13 @@ export function updateProjectAllotmentRepository(id: number, repositoryUrl: stri
   return request<ProjectAllotment>(`/api/project-allotments/${id}/repository`, {
     method: "PATCH",
     body: JSON.stringify({ repositoryUrl }),
+  });
+}
+
+export function updateProjectAllotmentAssistance(id: number, assistanceBy: string[]) {
+  return request<ProjectAllotment>(`/api/project-allotments/${id}/assistance`, {
+    method: "PATCH",
+    body: JSON.stringify({ assistanceBy }),
   });
 }
 

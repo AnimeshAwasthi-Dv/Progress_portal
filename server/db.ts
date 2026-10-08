@@ -66,6 +66,7 @@ export async function initializeDatabase() {
         employee_name TEXT NOT NULL CHECK (length(trim(employee_name)) > 0),
         project TEXT NOT NULL CHECK (length(trim(project)) > 0),
         task_assigned TEXT NOT NULL CHECK (length(trim(task_assigned)) > 0),
+        assistance_by TEXT[] NOT NULL DEFAULT '{}',
         progress TEXT NOT NULL DEFAULT 'Not Started'
           CONSTRAINT project_allotments_progress_check
           CHECK (progress IN ('Not Started', 'In Progress', 'Blocked', 'Completed')),
@@ -85,6 +86,24 @@ export async function initializeDatabase() {
     await client.query(`
       ALTER TABLE project_allotments
       ADD COLUMN IF NOT EXISTS repository_url TEXT
+    `);
+    await client.query(`
+      ALTER TABLE project_allotments
+      ADD COLUMN IF NOT EXISTS assistance_by TEXT[]
+    `);
+    await client.query(`
+      UPDATE project_allotments
+      SET assistance_by = CASE
+        WHEN NULLIF(trim(assigned_by), '') IS NULL OR assigned_by = 'Not recorded'
+          THEN '{}'::TEXT[]
+        ELSE ARRAY[assigned_by]
+      END
+      WHERE assistance_by IS NULL
+    `);
+    await client.query(`
+      ALTER TABLE project_allotments
+      ALTER COLUMN assistance_by SET DEFAULT '{}',
+      ALTER COLUMN assistance_by SET NOT NULL
     `);
     await client.query(`
       DO $$
@@ -145,7 +164,7 @@ export type ProjectAllotment = {
   employeeName: string;
   project: string;
   taskAssigned: string;
-  assignedBy: string;
+  assistanceBy: string[];
   progress: TaskProgress;
   repositoryUrl: string | null;
 };
@@ -160,7 +179,7 @@ export async function listProjectAllotments() {
       employee_name AS "employeeName",
       project,
       task_assigned AS "taskAssigned",
-      assigned_by AS "assignedBy",
+      assistance_by AS "assistanceBy",
       progress,
       repository_url AS "repositoryUrl"
     FROM project_allotments
@@ -173,7 +192,7 @@ export async function createProjectAllotments(input: {
   employeeNames: string[];
   project: string;
   taskAssigned: string;
-  assignedBy: string;
+  assistanceBy: string[];
   progress: TaskProgress;
   repositoryUrl: string | null;
 }) {
@@ -205,8 +224,8 @@ export async function createProjectAllotments(input: {
 
       const inserted = await client.query<ProjectAllotment>(
         `INSERT INTO project_allotments
-           (serial_number, employee_name, project, task_assigned, assigned_by, progress, repository_url)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+           (serial_number, employee_name, project, task_assigned, assigned_by, assistance_by, progress, repository_url)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (serial_number, employee_name, project, task_assigned) DO NOTHING
          RETURNING
            id,
@@ -214,7 +233,7 @@ export async function createProjectAllotments(input: {
            employee_name AS "employeeName",
            project,
            task_assigned AS "taskAssigned",
-           assigned_by AS "assignedBy",
+           assistance_by AS "assistanceBy",
            progress,
            repository_url AS "repositoryUrl"`,
         [
@@ -222,7 +241,8 @@ export async function createProjectAllotments(input: {
           employeeName,
           input.project,
           input.taskAssigned,
-          input.assignedBy,
+          input.assistanceBy.join(", "),
+          input.assistanceBy,
           input.progress,
           input.repositoryUrl,
         ],
@@ -256,7 +276,7 @@ export async function updateProjectAllotmentProgress(id: number, progress: TaskP
        employee_name AS "employeeName",
        project,
        task_assigned AS "taskAssigned",
-       assigned_by AS "assignedBy",
+       assistance_by AS "assistanceBy",
        progress,
        repository_url AS "repositoryUrl"`,
     [id, progress],
@@ -275,10 +295,31 @@ export async function updateProjectAllotmentRepository(id: number, repositoryUrl
        employee_name AS "employeeName",
        project,
        task_assigned AS "taskAssigned",
-       assigned_by AS "assignedBy",
+       assistance_by AS "assistanceBy",
        progress,
        repository_url AS "repositoryUrl"`,
     [id, repositoryUrl],
+  );
+  return rows[0] ?? null;
+}
+
+export async function updateProjectAllotmentAssistance(id: number, assistanceBy: string[]) {
+  const { rows } = await pool.query<ProjectAllotment>(
+    `UPDATE project_allotments
+     SET assistance_by = $2,
+         assigned_by = array_to_string($2::TEXT[], ', '),
+         updated_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       serial_number AS "serialNumber",
+       employee_name AS "employeeName",
+       project,
+       task_assigned AS "taskAssigned",
+       assistance_by AS "assistanceBy",
+       progress,
+       repository_url AS "repositoryUrl"`,
+    [id, assistanceBy],
   );
   return rows[0] ?? null;
 }

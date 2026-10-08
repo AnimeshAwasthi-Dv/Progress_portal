@@ -9,6 +9,7 @@ import {
   listProjectAllotments,
   saveDailyProgressReport,
   updateEmployee,
+  updateProjectAllotmentAssistance,
   updateProjectAllotmentRepository,
   type DailyProgressReportInput,
   type EmployeeInput,
@@ -54,7 +55,7 @@ function parseProjectAllotmentInput(
   employeeNames: string[];
   project: string;
   taskAssigned: string;
-  assignedBy: string;
+  assistanceBy: string[];
   progress: TaskProgress;
   repositoryUrl: string | null;
 } | null {
@@ -69,7 +70,7 @@ function parseProjectAllotmentInput(
     : [];
   const project = typeof data.project === "string" ? data.project.trim() : "";
   const taskAssigned = typeof data.taskAssigned === "string" ? data.taskAssigned.trim() : "";
-  const assignedBy = typeof data.assignedBy === "string" ? data.assignedBy.trim() : "";
+  const assistanceBy = parseAssistanceNames(data.assistanceBy);
   const progress = data.progress;
   const repositoryUrl =
     typeof data.repositoryUrl === "string" && data.repositoryUrl.trim()
@@ -90,12 +91,14 @@ function parseProjectAllotmentInput(
     employeeNames.length > 50 ||
     employeeNames.some((name) => name.length > 120) ||
     !project ||
-    !assignedBy ||
+    !assistanceBy ||
+    assistanceBy.length === 0 ||
+    assistanceBy.length > 50 ||
+    assistanceBy.some((name) => name.length > 120) ||
     !taskAssigned ||
     typeof progress !== "string" ||
     !taskProgressOptions.includes(progress as TaskProgress) ||
     project.length > 240 ||
-    assignedBy.length > 120 ||
     taskAssigned.length > 4000 ||
     (data.repositoryUrl !== undefined &&
       data.repositoryUrl !== null &&
@@ -110,10 +113,20 @@ function parseProjectAllotmentInput(
     employeeNames,
     project,
     taskAssigned,
-    assignedBy,
+    assistanceBy,
     progress: progress as TaskProgress,
     repositoryUrl,
   };
+}
+
+function parseAssistanceNames(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.some((name) => typeof name !== "string")) return null;
+  const names = value.map((name: string) => name.trim()).filter(Boolean);
+  return names.filter(
+    (name, index) =>
+      names.findIndex((candidate) => candidate.toLocaleLowerCase() === name.toLocaleLowerCase()) ===
+      index,
+  );
 }
 
 function isValidDate(value: string) {
@@ -201,7 +214,7 @@ app.post(
     const allotment = parseProjectAllotmentInput(request.body);
     if (!allotment) {
       response.status(400).json({
-        error: "Select at least one assignee and provide the assigner, project, and task within the allowed lengths.",
+        error: "Select at least one assignee, add at least one assistance contact, and provide the project and task within the allowed lengths.",
       });
       return;
     }
@@ -233,6 +246,36 @@ app.patch(
     }
 
     const updated = await updateProjectAllotmentProgress(id, progress as TaskProgress);
+    if (!updated) {
+      response.status(404).json({ error: "Task assignment not found." });
+      return;
+    }
+    response.json(updated);
+  }),
+);
+
+app.patch(
+  "/api/project-allotments/:id/assistance",
+  asyncRoute(async (request, response) => {
+    const id = Number(request.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) {
+      response.status(400).json({ error: "Task ID must be a positive integer." });
+      return;
+    }
+
+    const assistanceBy = parseAssistanceNames(
+      (request.body as Record<string, unknown> | null)?.assistanceBy,
+    );
+    if (
+      !assistanceBy ||
+      assistanceBy.length > 50 ||
+      assistanceBy.some((name) => name.length > 120)
+    ) {
+      response.status(400).json({ error: "Provide up to 50 valid assistance names." });
+      return;
+    }
+
+    const updated = await updateProjectAllotmentAssistance(id, assistanceBy);
     if (!updated) {
       response.status(404).json({ error: "Task assignment not found." });
       return;

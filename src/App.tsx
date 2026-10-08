@@ -22,6 +22,7 @@ import {
   type DailyProgressReport,
   type ProjectAllotment,
   type TaskProgress,
+  updateProjectAllotmentAssistance,
   updateProjectAllotmentProgress,
   updateProjectAllotmentRepository,
 } from "./api";
@@ -111,6 +112,13 @@ function App() {
   } | null>(null);
   const [repositoryError, setRepositoryError] = useState("");
   const [isSavingRepository, setIsSavingRepository] = useState(false);
+  const [assistanceEditor, setAssistanceEditor] = useState<{
+    allotment: ProjectAllotment;
+    names: string[];
+  } | null>(null);
+  const [assistanceNameInput, setAssistanceNameInput] = useState("");
+  const [assistanceError, setAssistanceError] = useState("");
+  const [isSavingAssistance, setIsSavingAssistance] = useState(false);
   const [reportForm, setReportForm] = useState({
     employeeName: "",
     completedToday: "",
@@ -118,11 +126,12 @@ function App() {
     blockers: "",
   });
   const [newTeamMemberName, setNewTeamMemberName] = useState("");
+  const [newAssistanceName, setNewAssistanceName] = useState("");
   const [taskForm, setTaskForm] = useState({
     employeeNames: [] as string[],
     project: "",
     taskAssigned: "",
-    assignedBy: "",
+    assistanceBy: [] as string[],
     progress: "Not Started" as TaskProgress,
     repositoryUrl: "",
   });
@@ -193,7 +202,7 @@ function App() {
           allotment.employeeName,
           allotment.project,
           allotment.taskAssigned,
-          allotment.assignedBy,
+          ...allotment.assistanceBy,
           allotment.progress,
           allotment.repositoryUrl ?? "",
         ]
@@ -217,11 +226,12 @@ function App() {
       employeeNames: [],
       project: "",
       taskAssigned: "",
-      assignedBy: "",
+      assistanceBy: [],
       progress: "Not Started",
       repositoryUrl: "",
     });
     setNewTeamMemberName("");
+    setNewAssistanceName("");
     setTaskError("");
     setIsAddTaskOpen(true);
   };
@@ -287,6 +297,62 @@ function App() {
     }
   };
 
+  const openAssistanceEditor = (allotment: ProjectAllotment) => {
+    setAssistanceEditor({ allotment, names: [...allotment.assistanceBy] });
+    setAssistanceNameInput("");
+    setAssistanceError("");
+  };
+
+  const handleSaveAssistance = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!assistanceEditor) return;
+    setAssistanceError("");
+    setIsSavingAssistance(true);
+    try {
+      const updated = await updateProjectAllotmentAssistance(
+        assistanceEditor.allotment.id,
+        assistanceEditor.names,
+      );
+      setAllotments((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setAssistanceEditor(null);
+    } catch (error) {
+      setAssistanceError(
+        error instanceof Error ? error.message : "Could not save the assistance list.",
+      );
+    } finally {
+      setIsSavingAssistance(false);
+    }
+  };
+
+  const addAssistanceName = () => {
+    const name = newAssistanceName.trim();
+    if (!name) return;
+    setTaskForm((current) => ({
+      ...current,
+      assistanceBy: current.assistanceBy.some(
+        (person) => person.toLocaleLowerCase() === name.toLocaleLowerCase(),
+      )
+        ? current.assistanceBy
+        : [...current.assistanceBy, name],
+    }));
+    setNewAssistanceName("");
+  };
+
+  const addEditedAssistanceName = () => {
+    const name = assistanceNameInput.trim();
+    if (!name || !assistanceEditor) return;
+    setAssistanceEditor((current) =>
+      current && !current.names.some(
+        (person) => person.toLocaleLowerCase() === name.toLocaleLowerCase(),
+      )
+        ? { ...current, names: [...current.names, name] }
+        : current,
+    );
+    setAssistanceNameInput("");
+  };
+
   const toggleTaskAssignee = (employeeName: string) => {
     setTaskForm((current) => ({
       ...current,
@@ -331,6 +397,10 @@ function App() {
   const handleAddTask = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setTaskError("");
+    if (taskForm.assistanceBy.length === 0) {
+      setTaskError("Add at least one person providing assistance.");
+      return;
+    }
     setIsSavingTask(true);
 
     try {
@@ -338,7 +408,7 @@ function App() {
         employeeNames: taskForm.employeeNames,
         project: taskForm.project.trim(),
         taskAssigned: taskForm.taskAssigned.trim(),
-        assignedBy: taskForm.assignedBy.trim(),
+        assistanceBy: taskForm.assistanceBy,
         progress: taskForm.progress,
         repositoryUrl: taskForm.repositoryUrl.trim(),
       });
@@ -608,10 +678,10 @@ function App() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1180px] border-collapse text-left">
+              <table className="w-full min-w-[1040px] border-collapse text-left">
                 <thead>
                   <tr className="bg-[#f1f5f0] text-center text-[10px] font-semibold text-[#688064]">
-                    {["A", "B", "C", "D", "E", "F", "G"].map((column) => (
+                    {["A", "B", "C", "D", "E", "F"].map((column) => (
                       <th key={column} className="border border-[#d7e1d4] px-2 py-1.5">
                         {column}
                       </th>
@@ -622,8 +692,7 @@ function App() {
                     <th className="w-48 border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Name</th>
                     <th className="w-[22%] border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Project</th>
                     <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Task Assigned</th>
-                    <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Progress</th>
-                    <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Assigned By</th>
+                    <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Assistance By</th>
                     <th className="border border-[#d7e1d4] bg-[#e9f1e7] px-5 py-3.5">Git Repository</th>
                   </tr>
                 </thead>
@@ -655,33 +724,27 @@ function App() {
                       <td className="border border-[#e0e8dd] px-5 py-4 text-sm leading-6 text-slate-600">
                         {allotment.taskAssigned}
                       </td>
-                      <td className="whitespace-nowrap border border-[#e0e8dd] px-5 py-4">
-                        <div className="flex flex-col items-start gap-1.5">
-                          <span
-                            className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${progressStyles[allotment.progress]}`}
+                      <td className="border border-[#e0e8dd] px-5 py-4 text-sm text-slate-500">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {allotment.assistanceBy.length > 0 ? (
+                            allotment.assistanceBy.map((person) => (
+                              <span
+                                key={person}
+                                className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-800"
+                              >
+                                {person}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-slate-300">—</span>
+                          )}
+                          <button
+                            onClick={() => openAssistanceEditor(allotment)}
+                            className="rounded px-1.5 py-1 text-[11px] font-semibold text-[#217346] hover:bg-[#edf5eb]"
                           >
-                            {allotment.progress}
-                          </span>
-                          <select
-                            aria-label={`Update progress for ${allotment.employeeName}: ${allotment.taskAssigned}`}
-                            value={allotment.progress}
-                            disabled={updatingProgressId === allotment.id}
-                            onChange={(event) =>
-                              void handleProgressChange(
-                                allotment,
-                                event.target.value as TaskProgress,
-                              )
-                            }
-                            className="max-w-[145px] rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-wait disabled:opacity-60"
-                          >
-                            {taskProgressOptions.map((progress) => (
-                              <option key={progress}>{progress}</option>
-                            ))}
-                          </select>
+                            Edit
+                          </button>
                         </div>
-                      </td>
-                      <td className="whitespace-nowrap border border-[#e0e8dd] px-5 py-4 text-sm text-slate-500">
-                        {allotment.assignedBy}
                       </td>
                       <td className="border border-[#e0e8dd] px-5 py-4 text-sm">
                         <div className="flex items-center gap-2">
@@ -711,14 +774,14 @@ function App() {
                   ))}
                   {isLoading && (
                     <tr>
-                      <td colSpan={7} className="px-6 py-12 text-center text-sm text-slate-400">
+                      <td colSpan={6} className="px-6 py-12 text-center text-sm text-slate-400">
                         Loading project allotments from PostgreSQL…
                       </td>
                     </tr>
                   )}
                   {!isLoading && filteredAllotments.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-6 py-12 text-center">
+                      <td colSpan={6} className="px-6 py-12 text-center">
                         {loadError ? (
                           <p className="text-sm font-semibold text-slate-600">
                             Project allotment data is unavailable.
@@ -967,9 +1030,38 @@ function App() {
                       {assignment.progress}
                     </span>
                   </p>
-                  <p className="mt-3 text-xs text-slate-500">
-                    Assigned by <span className="font-semibold text-slate-700">{assignment.assignedBy}</span>
-                  </p>
+                  <label className="mt-3 flex items-center gap-2 text-xs font-medium text-slate-500">
+                    Update progress
+                    <select
+                      aria-label={`Update progress for ${assignment.employeeName}: ${assignment.taskAssigned}`}
+                      value={assignment.progress}
+                      disabled={updatingProgressId === assignment.id}
+                      onChange={(event) =>
+                        void handleProgressChange(
+                          assignment,
+                          event.target.value as TaskProgress,
+                        )
+                      }
+                      className="max-w-[160px] rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600 outline-none focus:border-blue-400 focus:ring-2 focus:ring-blue-100 disabled:cursor-wait disabled:opacity-60"
+                    >
+                      {taskProgressOptions.map((progress) => (
+                        <option key={progress}>{progress}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                    Assistance by
+                    {assignment.assistanceBy.length > 0
+                      ? assignment.assistanceBy.map((person) => (
+                          <span
+                            key={person}
+                            className="rounded-full bg-emerald-50 px-2 py-1 font-semibold text-emerald-800"
+                          >
+                            {person}
+                          </span>
+                        ))
+                      : <span className="text-slate-400">—</span>}
+                  </div>
                   {assignment.repositoryUrl && (
                     <a
                       href={assignment.repositoryUrl}
@@ -992,6 +1084,134 @@ function App() {
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {assistanceEditor && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/40 p-4 backdrop-blur-[2px]"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !isSavingAssistance) {
+              setAssistanceEditor(null);
+            }
+          }}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="assistance-title"
+            className="my-auto w-full max-w-[520px] rounded-2xl border border-slate-200/80 bg-white shadow-xl shadow-slate-900/10"
+          >
+            <div className="flex items-start justify-between border-b border-slate-100 px-6 py-5">
+              <div>
+                <h2 id="assistance-title" className="font-display text-lg font-bold text-slate-900">
+                  Assistance by
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {assistanceEditor.allotment.project} · {assistanceEditor.allotment.employeeName}
+                </p>
+              </div>
+              <button
+                aria-label="Close assistance editor"
+                disabled={isSavingAssistance}
+                onClick={() => setAssistanceEditor(null)}
+                className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50"
+              >
+                <X className="h-[18px] w-[18px]" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveAssistance} className="space-y-4 p-6">
+              <fieldset>
+                <legend className="mb-2 text-xs font-semibold text-slate-600">
+                  Add all people providing assistance
+                </legend>
+                <div className="grid max-h-48 grid-cols-1 gap-2 overflow-y-auto rounded-lg border border-slate-200 p-3 sm:grid-cols-2">
+                  {[...new Set([...employees, ...assistanceEditor.names])].map((person) => {
+                    const selected = assistanceEditor.names.includes(person);
+                    return (
+                      <label
+                        key={person}
+                        className={`flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition ${
+                          selected
+                            ? "bg-emerald-50 font-semibold text-emerald-800"
+                            : "text-slate-600 hover:bg-slate-50"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() =>
+                            setAssistanceEditor((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    names: selected
+                                      ? current.names.filter((name) => name !== person)
+                                      : [...current.names, person],
+                                  }
+                                : current,
+                            )
+                          }
+                          className="h-4 w-4 rounded border-slate-300 text-emerald-700 focus:ring-emerald-600"
+                        />
+                        {person}
+                      </label>
+                    );
+                  })}
+                  {employees.length === 0 && assistanceEditor.names.length === 0 && (
+                    <p className="col-span-full px-2 py-1 text-xs text-slate-400">
+                      Add names below.
+                    </p>
+                  )}
+                </div>
+              </fieldset>
+              <div className="flex gap-2">
+                <input
+                  maxLength={120}
+                  value={assistanceNameInput}
+                  onChange={(event) => setAssistanceNameInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addEditedAssistanceName();
+                    }
+                  }}
+                  placeholder="Add another person's name"
+                  className="form-control"
+                />
+                <button
+                  type="button"
+                  onClick={addEditedAssistanceName}
+                  disabled={!assistanceNameInput.trim()}
+                  className="shrink-0 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Add person
+                </button>
+              </div>
+              {assistanceError && (
+                <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+                  Could not save assistance: {assistanceError}
+                </p>
+              )}
+              <div className="flex justify-end gap-2.5 border-t border-slate-100 pt-5">
+                <button
+                  type="button"
+                  disabled={isSavingAssistance}
+                  onClick={() => setAssistanceEditor(null)}
+                  className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingAssistance}
+                  className="rounded-lg bg-[#217346] px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-[#185c37] focus:outline-none focus:ring-4 focus:ring-emerald-100 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {isSavingAssistance ? "Saving…" : "Save assistance"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
@@ -1270,21 +1490,65 @@ function App() {
                 </div>
               </fieldset>
 
-              <label className="block">
-                <span className="mb-1.5 block text-xs font-semibold text-slate-600">
-                  Assigned by
-                </span>
-                <input
-                  required
-                  maxLength={120}
-                  value={taskForm.assignedBy}
-                  onChange={(event) =>
-                    setTaskForm({ ...taskForm, assignedBy: event.target.value })
-                  }
-                  placeholder="Who is assigning this task?"
-                  className="form-control"
-                />
-              </label>
+              <fieldset className="block">
+                <legend className="mb-1.5 block text-xs font-semibold text-slate-600">
+                  Assistance by <span className="font-normal text-slate-400">(add one or more people)</span>
+                </legend>
+                {taskForm.assistanceBy.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {taskForm.assistanceBy.map((person) => (
+                      <span
+                        key={person}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 py-1 pl-2.5 pr-1 text-xs font-semibold text-emerald-800"
+                      >
+                        {person}
+                        <button
+                          type="button"
+                          aria-label={`Remove ${person} from assistance`}
+                          onClick={() =>
+                            setTaskForm({
+                              ...taskForm,
+                              assistanceBy: taskForm.assistanceBy.filter((name) => name !== person),
+                            })
+                          }
+                          className="rounded-full p-0.5 hover:bg-emerald-100"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <input
+                    maxLength={120}
+                    value={newAssistanceName}
+                    onChange={(event) => setNewAssistanceName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        addAssistanceName();
+                      }
+                    }}
+                    list="assistance-team-members"
+                    placeholder="Enter a person's name"
+                    className="form-control"
+                  />
+                  <datalist id="assistance-team-members">
+                    {employees.map((employee) => (
+                      <option key={employee} value={employee} />
+                    ))}
+                  </datalist>
+                  <button
+                    type="button"
+                    onClick={addAssistanceName}
+                    disabled={!newAssistanceName.trim()}
+                    className="shrink-0 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Add person
+                  </button>
+                </div>
+              </fieldset>
 
               <label className="block">
                 <span className="mb-1.5 block text-xs font-semibold text-slate-600">Project</span>
