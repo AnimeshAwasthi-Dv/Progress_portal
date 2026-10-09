@@ -472,6 +472,35 @@ export async function initializeDatabase() {
       )
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS user_audit_history (
+        id SERIAL PRIMARY KEY,
+        actor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        target_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        action TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS project_activity_history (
+        id SERIAL PRIMARY KEY,
+        actor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+        action TEXT NOT NULL,
+        details TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      ALTER TABLE daily_progress_reports
+        ADD COLUMN IF NOT EXISTS user_id INTEGER,
+        ADD COLUMN IF NOT EXISTS project_id INTEGER,
+        ADD COLUMN IF NOT EXISTS task_id INTEGER
+    `);
+
     // Indexes for fast querying
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
@@ -482,6 +511,26 @@ export async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON tasks(due_date);
       CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id, is_read);
       CREATE INDEX IF NOT EXISTS idx_activity_task_id ON task_activity_history(task_id);
+      CREATE INDEX IF NOT EXISTS idx_project_members_user_id ON project_members(user_id, project_id);
+      CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members(user_id, team_id);
+      CREATE INDEX IF NOT EXISTS idx_user_audit_target ON user_audit_history(target_user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_daily_reports_user_date ON daily_progress_reports(user_id, report_date);
+      CREATE INDEX IF NOT EXISTS idx_daily_reports_project_id ON daily_progress_reports(project_id);
+      CREATE INDEX IF NOT EXISTS idx_project_activity_project_id ON project_activity_history(project_id, created_at DESC);
+    `);
+
+    await client.query(`
+      DELETE FROM project_members pm
+      USING projects p
+      WHERE p.id = pm.project_id
+        AND pm.role_in_project = 'Contributor'
+        AND pm.user_id <> p.manager_id
+        AND pm.user_id <> p.lead_id
+        AND NOT EXISTS (
+          SELECT 1 FROM tasks t
+          WHERE t.project_id = p.id
+            AND t.assigned_to_user_id = pm.user_id
+        )
     `);
 
     // Seed default teams and users if not exists
@@ -580,8 +629,8 @@ export async function initializeDatabase() {
         );
         insertedProjects[p.name] = pRes.rows[0].id;
 
-        // Add team members to project members
-        for (const uId of Object.values(insertedUsers)) {
+        // Seed only explicit project owners; task assignments grant employee access separately.
+        for (const uId of new Set([insertedUsers[p.mgr], insertedUsers[p.lead]])) {
           await client.query(
             `INSERT INTO project_members (project_id, user_id, role_in_project)
              VALUES ($1, $2, 'Contributor')
@@ -710,7 +759,23 @@ export async function initializeDatabase() {
 
 // ----------------- Data Access Functions ----------------- //
 
-export async function listUsers() {
+export async function listUsers(viewer?: AccessUser) {
+  const values: unknown[] = [];
+  let whereClause = "";
+  if (viewer && viewer.role !== "Admin") {
+    if (viewer.role === "Individual") {
+      whereClause = "WHERE u.id = $1";
+      values.push(viewer.id);
+    } else {
+      whereClause = `WHERE u.id = $1 OR (u.is_active = true AND EXISTS (
+        SELECT 1 FROM team_members target_membership
+        JOIN teams authorized_team ON authorized_team.id = target_membership.team_id
+        WHERE target_membership.user_id = u.id
+          AND (authorized_team.manager_id = $1 OR authorized_team.lead_id = $1)
+      ))`;
+      values.push(viewer.id);
+    }
+  }
   const { rows } = await pool.query<User>(`
     SELECT 
       u.id,
@@ -727,8 +792,9 @@ export async function listUsers() {
       u.updated_at AS "updatedAt"
     FROM users u
     LEFT JOIN teams t ON u.team_id = t.id
+    ${whereClause}
     ORDER BY u.id
-  `);
+  `, values);
   return rows;
 }
 
@@ -754,41 +820,222 @@ export async function getUserById(id: number) {
   return rows[0] ?? null;
 }
 
-export async function updateUserRoleAndStatus(id: number, input: { role?: UserRole; isActive?: boolean; teamId?: number | null; designation?: string; department?: string; name?: string }) {
-  const fields: string[] = [];
-  const values: unknown[] = [id];
-  let idx = 2;
+export async function updateUserRoleAndStatus(
+  id: number,
+  input: { role?: UserRole; teamId?: number | null; designation?: string; department?: string; name?: string },
+  actorUserId?: number,
+) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE");
+    const currentResult = await client.query<{ role: UserRole; isActive: boolean; teamId: number | null }>(
+      `SELECT role, is_active AS "isActive", team_id AS "teamId" FROM users WHERE id = $1 FOR UPDATE`,
+      [id],
+    );
+    const current = currentResult.rows[0];
+    if (!current) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (current.role === "Admin" && current.isActive && input.role !== undefined && input.role !== "Admin") {
+      const adminCount = await client.query<{ count: string }>(
+        "SELECT COUNT(*) FROM users WHERE role = 'Admin' AND is_active = true",
+      );
+      if (Number(adminCount.rows[0].count) <= 1) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+    }
 
-  if (input.name !== undefined) {
-    fields.push(`name = $${idx++}`);
-    values.push(input.name);
-  }
-  if (input.role !== undefined) {
-    fields.push(`role = $${idx++}`);
-    values.push(input.role);
-  }
-  if (input.isActive !== undefined) {
-    fields.push(`is_active = $${idx++}`);
-    values.push(input.isActive);
-  }
-  if (input.teamId !== undefined) {
-    fields.push(`team_id = $${idx++}`);
-    values.push(input.teamId);
-  }
-  if (input.designation !== undefined) {
-    fields.push(`designation = $${idx++}`);
-    values.push(input.designation);
-  }
-  if (input.department !== undefined) {
-    fields.push(`department = $${idx++}`);
-    values.push(input.department);
-  }
+    const fields: string[] = [];
+    const values: unknown[] = [id];
+    let idx = 2;
+    for (const [property, column] of [
+      ["name", "name"],
+      ["role", "role"],
+      ["teamId", "team_id"],
+      ["designation", "designation"],
+      ["department", "department"],
+    ] as const) {
+      const value = input[property];
+      if (value !== undefined) {
+        fields.push(`${column} = $${idx++}`);
+        values.push(value);
+      }
+    }
+    if (fields.length > 0) {
+      fields.push("updated_at = NOW()");
+      await client.query(`UPDATE users SET ${fields.join(", ")} WHERE id = $1`, values);
+    }
 
-  if (fields.length === 0) return getUserById(id);
+    if (input.teamId !== undefined && input.teamId !== current.teamId) {
+      await client.query("DELETE FROM team_members WHERE user_id = $1", [id]);
+      if (input.teamId !== null) {
+        await client.query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [input.teamId, id]);
+      }
+    }
+    if (input.role !== undefined) {
+      if (!["Admin", "Manager"].includes(input.role)) {
+        await client.query("UPDATE teams SET manager_id = NULL WHERE manager_id = $1", [id]);
+      }
+      if (input.role !== "Team Lead") {
+        await client.query("UPDATE teams SET lead_id = NULL WHERE lead_id = $1", [id]);
+      }
+    }
+    if (actorUserId !== undefined && fields.length > 0) {
+      await client.query(`
+        INSERT INTO user_audit_history (actor_user_id, target_user_id, action, reason)
+        VALUES ($1, $2, 'USER_PROFILE_UPDATED', 'Role, profile, or team assignment updated')
+      `, [actorUserId, id]);
+    }
+    await client.query("COMMIT");
+    return getUserById(id);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
 
-  fields.push(`updated_at = NOW()`);
-  await pool.query(`UPDATE users SET ${fields.join(", ")} WHERE id = $1`, values);
-  return getUserById(id);
+export type DeactivateUserResult =
+  | { ok: true; user: User | null; reassignedTaskCount: number }
+  | { ok: false; code: "not_found" | "forbidden" | "last_admin" | "needs_reassignment" | "invalid_replacement"; activeTaskCount?: number };
+
+export async function deactivateUser(
+  actor: AccessUser,
+  targetUserId: number,
+  reassignToUserId?: number,
+  reason = "",
+): Promise<DeactivateUserResult> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE");
+    const targetResult = await client.query<{ id: number; role: UserRole; teamId: number | null; isActive: boolean }>(`
+      SELECT id, role, team_id AS "teamId", is_active AS "isActive"
+      FROM users WHERE id = $1 FOR UPDATE
+    `, [targetUserId]);
+    const target = targetResult.rows[0];
+    if (!target || !target.isActive) {
+      await client.query("ROLLBACK");
+      return { ok: false, code: "not_found" };
+    }
+
+    if (actor.role !== "Admin") {
+      const managedTeam = await client.query<{ allowed: boolean }>(`
+        SELECT EXISTS (
+          SELECT 1 FROM teams managed_team
+          WHERE (managed_team.manager_id = $1 OR managed_team.lead_id = $1)
+            AND EXISTS (
+              SELECT 1 FROM team_members target_membership
+              WHERE target_membership.team_id = managed_team.id AND target_membership.user_id = $2
+            )
+        ) AS allowed
+      `, [actor.id, targetUserId]);
+      if (
+        !["Manager", "Team Lead"].includes(actor.role) ||
+        target.role !== "Individual" ||
+        actor.id === targetUserId ||
+        !managedTeam.rows[0]?.allowed
+      ) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "forbidden" };
+      }
+    }
+
+    if (target.role === "Admin") {
+      const adminCount = await client.query<{ count: string }>(
+        "SELECT COUNT(*) FROM users WHERE role = 'Admin' AND is_active = true",
+      );
+      if (Number(adminCount.rows[0].count) <= 1) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "last_admin" };
+      }
+    }
+
+    const activeTasks = await client.query<{ id: number; projectId: number; taskCode: string }>(`
+      SELECT id, project_id AS "projectId", task_code AS "taskCode"
+      FROM tasks WHERE assigned_to_user_id = $1 AND status <> 'Completed'
+      FOR UPDATE
+    `, [targetUserId]);
+    if (activeTasks.rows.length > 0 && !reassignToUserId) {
+      await client.query("ROLLBACK");
+      return { ok: false, code: "needs_reassignment", activeTaskCount: activeTasks.rows.length };
+    }
+
+    if (reassignToUserId) {
+      const replacement = await client.query<{ id: number }>(
+        "SELECT id FROM users WHERE id = $1 AND is_active = true AND id <> $2",
+        [reassignToUserId, targetUserId],
+      );
+      if (!replacement.rows[0]) {
+        await client.query("ROLLBACK");
+        return { ok: false, code: "invalid_replacement" };
+      }
+      if (actor.role !== "Admin") {
+        const replacementInTeam = await client.query<{ allowed: boolean }>(`
+          SELECT EXISTS (
+            SELECT 1 FROM team_members actor_membership
+            JOIN team_members replacement_membership ON replacement_membership.team_id = actor_membership.team_id
+            JOIN teams authorized_team ON authorized_team.id = actor_membership.team_id
+            WHERE actor_membership.user_id = $1
+              AND replacement_membership.user_id = $2
+              AND (authorized_team.manager_id = $1 OR authorized_team.lead_id = $1)
+          ) AS allowed
+        `, [actor.id, reassignToUserId]);
+        if (!replacementInTeam.rows[0]?.allowed) {
+          await client.query("ROLLBACK");
+          return { ok: false, code: "invalid_replacement" };
+        }
+      }
+      for (const task of activeTasks.rows) {
+        await client.query(
+          "UPDATE tasks SET assigned_to_user_id = $2, updated_at = NOW() WHERE id = $1",
+          [task.id, reassignToUserId],
+        );
+        await client.query(`
+          INSERT INTO task_activity_history (task_id, actor_user_id, action, field_changed, old_value, new_value, reason)
+          VALUES ($1, $2, 'REASSIGNED', 'assigned_to', $3, $4, $5)
+        `, [task.id, actor.id, String(targetUserId), String(reassignToUserId), reason || "Employee deactivated"]);
+        await client.query(`
+          INSERT INTO notifications (user_id, title, message, type, task_id, project_id)
+          VALUES ($1, 'Task Reassigned to You', $2, 'reassignment', $3, $4)
+        `, [reassignToUserId, `Task ${task.taskCode} was reassigned after an employee was deactivated.`, task.id, task.projectId]);
+        await client.query(
+          "INSERT INTO project_members (project_id, user_id, role_in_project) VALUES ($1, $2, 'Member') ON CONFLICT DO NOTHING",
+          [task.projectId, reassignToUserId],
+        );
+      }
+    }
+
+    const reviewerTasks = await client.query<{ id: number }>(`
+      UPDATE tasks SET reviewer_user_id = NULL, updated_at = NOW()
+      WHERE reviewer_user_id = $1 AND status <> 'Completed' RETURNING id
+    `, [targetUserId]);
+    for (const task of reviewerTasks.rows) {
+      await client.query(`
+        INSERT INTO task_activity_history (task_id, actor_user_id, action, field_changed, old_value, new_value, reason)
+        VALUES ($1, $2, 'REVIEWER_CHANGED', 'reviewer', $3, 'Unassigned', $4)
+      `, [task.id, actor.id, String(targetUserId), reason || "Reviewer deactivated"]);
+    }
+
+    await client.query("DELETE FROM project_members WHERE user_id = $1", [targetUserId]);
+    await client.query("DELETE FROM team_members WHERE user_id = $1", [targetUserId]);
+    await client.query("UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1", [targetUserId]);
+    await client.query(`
+      INSERT INTO user_audit_history (actor_user_id, target_user_id, action, reason)
+      VALUES ($1, $2, 'EMPLOYEE_DEACTIVATED', $3)
+    `, [actor.id, targetUserId, reason]);
+    await client.query("COMMIT");
+    return { ok: true, user: await getUserById(targetUserId), reassignedTaskCount: activeTasks.rows.length };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function createUser(input: {
@@ -798,27 +1045,52 @@ export async function createUser(input: {
   department: string;
   designation: string;
   teamId?: number | null;
+  createdByUserId?: number;
+  projectIds?: number[];
 }) {
-  const { rows } = await pool.query<{ id: number }>(`
-    INSERT INTO users (name, email, role, department, designation, team_id)
-    VALUES ($1, $2, $3, $4, $5, $6)
-    RETURNING id
-  `, [input.name, input.email, input.role, input.department, input.designation, input.teamId || null]);
-
-  if (input.teamId) {
-    await pool.query(`INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [input.teamId, rows[0].id]);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{ id: number }>(`
+      INSERT INTO users (name, email, role, department, designation, team_id)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id
+    `, [input.name, input.email, input.role, input.department, input.designation, input.teamId || null]);
+    const userId = rows[0].id;
+    if (input.teamId) {
+      await client.query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [input.teamId, userId]);
+    }
+    for (const projectId of new Set(input.projectIds || [])) {
+      await client.query("INSERT INTO project_members (project_id, user_id, role_in_project) VALUES ($1, $2, 'Member') ON CONFLICT DO NOTHING", [projectId, userId]);
+    }
+    await client.query(`
+      INSERT INTO employees (name, department, designation, current_work, status)
+      VALUES ($1, $2, $3, 'Active project tasks', 'In Progress')
+      ON CONFLICT DO NOTHING
+    `, [input.name, input.department, input.designation]);
+    if (input.createdByUserId !== undefined) {
+      await client.query(`
+        INSERT INTO user_audit_history (actor_user_id, target_user_id, action, reason)
+        VALUES ($1, $2, 'EMPLOYEE_CREATED', 'Employee profile created')
+      `, [input.createdByUserId, userId]);
+    }
+    await client.query("COMMIT");
+    return getUserById(userId);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
   }
-
-  await pool.query(`
-    INSERT INTO employees (name, department, designation, current_work, status)
-    VALUES ($1, $2, $3, 'Active project tasks', 'In Progress')
-    ON CONFLICT DO NOTHING
-  `, [input.name, input.department, input.designation]);
-
-  return getUserById(rows[0].id);
 }
 
-export async function listTeams() {
+export async function listTeams(viewer?: AccessUser) {
+  const values: unknown[] = [];
+  let whereClause = "";
+  if (viewer && viewer.role !== "Admin") {
+    whereClause = "WHERE t.manager_id = $1 OR t.lead_id = $1";
+    values.push(viewer.id);
+  }
   const { rows } = await pool.query<Team>(`
     SELECT 
       t.id,
@@ -828,16 +1100,18 @@ export async function listTeams() {
       um.name AS "managerName",
       t.lead_id AS "leadId",
       ul.name AS "leadName",
-      COUNT(DISTINCT tm.user_id)::integer AS "memberCount",
+      COUNT(DISTINCT tm.user_id) FILTER (WHERE member_user.is_active = true)::integer AS "memberCount",
       t.created_at AS "createdAt",
       t.updated_at AS "updatedAt"
     FROM teams t
     LEFT JOIN users um ON t.manager_id = um.id
     LEFT JOIN users ul ON t.lead_id = ul.id
     LEFT JOIN team_members tm ON t.id = tm.team_id
+    LEFT JOIN users member_user ON member_user.id = tm.user_id
+    ${whereClause}
     GROUP BY t.id, um.name, ul.name
     ORDER BY t.id
-  `);
+  `, values);
   return rows;
 }
 
@@ -850,7 +1124,58 @@ export async function createTeam(input: { name: string; description?: string; ma
   return rows[0];
 }
 
-export async function listProjects() {
+type AccessUser = Pick<User, "id" | "role" | "teamId">;
+
+function projectVisibilityClause(user: AccessUser, projectAlias: string, firstParameter: number) {
+  const userParameter = `$${firstParameter}`;
+  if (user.role === "Admin") return { sql: "TRUE", values: [] as unknown[] };
+  if (user.role === "Individual") {
+    return {
+      sql: `(
+        EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = ${projectAlias}.id AND pm.user_id = ${userParameter})
+        OR EXISTS (
+          SELECT 1 FROM tasks assigned_task
+          WHERE assigned_task.project_id = ${projectAlias}.id
+            AND (assigned_task.assigned_to_user_id = ${userParameter}
+              OR EXISTS (SELECT 1 FROM task_collaborators tc WHERE tc.task_id = assigned_task.id AND tc.user_id = ${userParameter}))
+        )
+      )`,
+      values: [user.id],
+    };
+  }
+
+  return {
+    sql: `(
+      ${projectAlias}.manager_id = ${userParameter}
+      OR ${projectAlias}.lead_id = ${userParameter}
+      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = ${projectAlias}.id AND pm.user_id = ${userParameter})
+    )`,
+    values: [user.id],
+  };
+}
+
+function taskVisibilityClause(user: AccessUser, taskAlias: string, projectAlias: string, firstParameter: number) {
+  if (user.role === "Admin") return { sql: "TRUE", values: [] as unknown[] };
+  if (user.role === "Individual") {
+    const userParameter = `$${firstParameter}`;
+    return {
+      sql: `(${taskAlias}.assigned_to_user_id = ${userParameter} OR EXISTS (
+        SELECT 1 FROM task_collaborators tc WHERE tc.task_id = ${taskAlias}.id AND tc.user_id = ${userParameter}
+      ))`,
+      values: [user.id],
+    };
+  }
+  return projectVisibilityClause(user, projectAlias, firstParameter);
+}
+
+export async function listProjects(viewer?: AccessUser) {
+  const values: unknown[] = [];
+  let whereClause = "";
+  if (viewer && viewer.role !== "Admin") {
+    const visibility = projectVisibilityClause(viewer, "p", 1);
+    whereClause = `WHERE ${visibility.sql}`;
+    values.push(...visibility.values);
+  }
   const { rows } = await pool.query<Project>(`
     SELECT 
       p.id,
@@ -873,10 +1198,45 @@ export async function listProjects() {
     LEFT JOIN users um ON p.manager_id = um.id
     LEFT JOIN users ul ON p.lead_id = ul.id
     LEFT JOIN tasks t ON p.id = t.project_id
+    ${whereClause}
     GROUP BY p.id, um.name, ul.name
     ORDER BY p.id
-  `);
+  `, values);
   return rows;
+}
+
+export async function canAccessProject(viewer: AccessUser, projectId: number) {
+  const visibility = projectVisibilityClause(viewer, "p", 2);
+  const { rows } = await pool.query<{ allowed: boolean }>(`
+    SELECT EXISTS (SELECT 1 FROM projects p WHERE p.id = $1 AND ${visibility.sql}) AS allowed
+  `, [projectId, ...visibility.values]);
+  return rows[0]?.allowed === true;
+}
+
+export async function canAssignUserToProject(viewer: AccessUser, targetUserId: number, projectId: number) {
+  if (viewer.role === "Admin") {
+    const { rows } = await pool.query<{ allowed: boolean }>(
+      "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active = true) AS allowed",
+      [targetUserId],
+    );
+    return rows[0]?.allowed === true;
+  }
+  const { rows } = await pool.query<{ allowed: boolean }>(`
+    SELECT EXISTS (
+      SELECT 1 FROM users target
+      WHERE target.id = $1 AND target.is_active = true
+        AND (
+          target.team_id = $2
+          OR EXISTS (
+            SELECT 1 FROM team_members actor_membership
+            JOIN team_members target_membership ON target_membership.team_id = actor_membership.team_id
+            WHERE actor_membership.user_id = $3 AND target_membership.user_id = target.id
+          )
+          OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = $4 AND pm.user_id = target.id)
+        )
+    ) AS allowed
+  `, [targetUserId, viewer.teamId ?? null, viewer.id, projectId]);
+  return rows[0]?.allowed === true;
 }
 
 export async function createProject(input: {
@@ -887,15 +1247,35 @@ export async function createProject(input: {
   leadId?: number | null;
   startDate?: string | null;
   targetDate?: string | null;
+  createdByUserId?: number;
 }) {
-  const { rows } = await pool.query<Project>(`
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<Project>(`
     INSERT INTO projects (name, code, description, manager_id, lead_id, start_date, target_date)
     VALUES ($1, $2, $3, $4, $5, $6::date, $7::date)
     RETURNING id, name, code, description, manager_id AS "managerId", lead_id AS "leadId", status,
       to_char(start_date, 'YYYY-MM-DD') AS "startDate", to_char(target_date, 'YYYY-MM-DD') AS "targetDate",
       created_at AS "createdAt", updated_at AS "updatedAt"
-  `, [input.name, input.code.toUpperCase(), input.description || null, input.managerId || null, input.leadId || null, input.startDate || null, input.targetDate || null]);
-  return rows[0];
+    `, [input.name, input.code.toUpperCase(), input.description || null, input.managerId || null, input.leadId || null, input.startDate || null, input.targetDate || null]);
+    for (const userId of new Set([input.managerId, input.leadId].filter((id): id is number => Boolean(id)))) {
+      await client.query("INSERT INTO project_members (project_id, user_id, role_in_project) VALUES ($1, $2, 'Manager') ON CONFLICT DO NOTHING", [rows[0].id, userId]);
+    }
+    if (input.createdByUserId !== undefined) {
+      await client.query(`
+        INSERT INTO project_activity_history (actor_user_id, project_id, action, details)
+        VALUES ($1, $2, 'PROJECT_CREATED', $3)
+      `, [input.createdByUserId, rows[0].id, input.name]);
+    }
+    await client.query("COMMIT");
+    return rows[0];
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function listTasks(filters?: {
@@ -906,6 +1286,7 @@ export async function listTasks(filters?: {
   status?: TaskStatus;
   priority?: TaskPriority;
   search?: string;
+  viewer?: AccessUser;
 }) {
   const conditions: string[] = [];
   const values: unknown[] = [];
@@ -940,6 +1321,18 @@ export async function listTasks(filters?: {
     conditions.push(`(t.title ILIKE $${idx} OR t.description ILIKE $${idx} OR t.task_code ILIKE $${idx} OR p.name ILIKE $${idx} OR u_to.name ILIKE $${idx})`);
     values.push(`%${filters.search}%`);
     idx++;
+  }
+  if (filters?.viewer && filters.viewer.role !== "Admin") {
+    if (filters.viewer.role === "Individual") {
+      conditions.push(`(t.assigned_to_user_id = $${idx} OR EXISTS (SELECT 1 FROM task_collaborators tc WHERE tc.task_id = t.id AND tc.user_id = $${idx}))`);
+      values.push(filters.viewer.id);
+      idx++;
+    } else {
+      const visibility = projectVisibilityClause(filters.viewer, "p", idx);
+      conditions.push(visibility.sql);
+      values.push(...visibility.values);
+      idx += visibility.values.length;
+    }
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -994,7 +1387,19 @@ export async function listTasks(filters?: {
   return rows;
 }
 
-export async function getTaskById(id: number) {
+export async function getTaskById(id: number, viewer?: AccessUser) {
+  const conditions = ["t.id = $1"];
+  const values: unknown[] = [id];
+  if (viewer && viewer.role !== "Admin") {
+    if (viewer.role === "Individual") {
+      conditions.push(`(t.assigned_to_user_id = $2 OR EXISTS (SELECT 1 FROM task_collaborators tc WHERE tc.task_id = t.id AND tc.user_id = $2))`);
+      values.push(viewer.id);
+    } else {
+      const visibility = projectVisibilityClause(viewer, "p", 2);
+      conditions.push(visibility.sql);
+      values.push(...visibility.values);
+    }
+  }
   const { rows } = await pool.query<Task>(`
     SELECT 
       t.id,
@@ -1037,9 +1442,9 @@ export async function getTaskById(id: number) {
     LEFT JOIN users u_rev ON t.reviewer_user_id = u_rev.id
     LEFT JOIN task_collaborators tc ON t.id = tc.task_id
     LEFT JOIN users tc_u ON tc.user_id = tc_u.id
-    WHERE t.id = $1
+    WHERE ${conditions.join(" AND ")}
     GROUP BY t.id, p.name, pt.title, u_by.name, u_to.name, u_rev.name
-  `, [id]);
+  `, values);
 
   if (!rows[0]) return null;
 
@@ -1128,6 +1533,9 @@ export async function createTask(input: {
       for (const colId of input.collaboratorIds) {
         await client.query(`INSERT INTO task_collaborators (task_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [taskId, colId]);
       }
+    }
+    for (const userId of new Set([input.assignedToUserId, input.reviewerUserId, ...(input.collaboratorIds || [])].filter((id): id is number => Boolean(id)))) {
+      await client.query("INSERT INTO project_members (project_id, user_id, role_in_project) VALUES ($1, $2, 'Member') ON CONFLICT DO NOTHING", [input.projectId, userId]);
     }
 
     // Record activity
@@ -1454,6 +1862,14 @@ export async function addSubtask(taskId: number, title: string) {
   return rows[0];
 }
 
+export async function getTaskIdForSubtask(subtaskId: number) {
+  const { rows } = await pool.query<{ taskId: number }>(
+    "SELECT task_id AS \"taskId\" FROM subtasks WHERE id = $1",
+    [subtaskId],
+  );
+  return rows[0]?.taskId ?? null;
+}
+
 export async function toggleSubtask(id: number, isCompleted: boolean) {
   const { rows } = await pool.query<Subtask>(`
     UPDATE subtasks
@@ -1485,7 +1901,19 @@ export async function markAllNotificationsRead(userId: number) {
   return { success: true };
 }
 
-export async function getTeamWorkloadAnalytics() {
+export async function getTeamWorkloadAnalytics(viewer: AccessUser) {
+  const userVisibility = viewer.role === "Admin"
+    ? "TRUE"
+    : viewer.role === "Individual"
+    ? "u.id = $1"
+    : `(u.id = $1 OR EXISTS (
+        SELECT 1 FROM team_members target_membership
+        JOIN teams authorized_team ON authorized_team.id = target_membership.team_id
+        WHERE target_membership.user_id = u.id
+          AND (authorized_team.manager_id = $1 OR authorized_team.lead_id = $1)
+      ))`;
+  const taskVisibility = taskVisibilityClause(viewer, "visible_task", "visible_project", 2);
+  const values = viewer.role === "Admin" ? taskVisibility.values : [viewer.id, ...taskVisibility.values];
   const { rows } = await pool.query(`
     SELECT 
       u.id AS "userId",
@@ -1496,39 +1924,70 @@ export async function getTeamWorkloadAnalytics() {
       u.department,
       t.id AS "teamId",
       t.name AS "teamName",
-      COUNT(tasks.id)::integer AS "totalTasks",
-      COUNT(CASE WHEN tasks.status = 'In Progress' THEN 1 END)::integer AS "inProgressTasks",
-      COUNT(CASE WHEN tasks.status = 'To Do' THEN 1 END)::integer AS "toDoTasks",
-      COUNT(CASE WHEN tasks.status = 'In Review' THEN 1 END)::integer AS "inReviewTasks",
-      COUNT(CASE WHEN tasks.status = 'Blocked' THEN 1 END)::integer AS "blockedTasks",
-      COUNT(CASE WHEN tasks.status = 'Completed' THEN 1 END)::integer AS "completedTasks",
-      COUNT(CASE WHEN tasks.due_date < CURRENT_DATE AND tasks.status NOT IN ('Completed') THEN 1 END)::integer AS "overdueTasks",
-      COALESCE(SUM(CASE WHEN tasks.status NOT IN ('Completed') THEN tasks.estimated_hours END), 0)::float AS "totalEstimatedHours",
-      COALESCE(SUM(tasks.actual_hours), 0)::float AS "totalActualHours"
+      COUNT(visible_task.id)::integer AS "totalTasks",
+      COUNT(CASE WHEN visible_task.status = 'In Progress' THEN 1 END)::integer AS "inProgressTasks",
+      COUNT(CASE WHEN visible_task.status = 'To Do' THEN 1 END)::integer AS "toDoTasks",
+      COUNT(CASE WHEN visible_task.status = 'In Review' THEN 1 END)::integer AS "inReviewTasks",
+      COUNT(CASE WHEN visible_task.status = 'Blocked' THEN 1 END)::integer AS "blockedTasks",
+      COUNT(CASE WHEN visible_task.status = 'Completed' THEN 1 END)::integer AS "completedTasks",
+      COUNT(CASE WHEN visible_task.due_date < CURRENT_DATE AND visible_task.status NOT IN ('Completed') THEN 1 END)::integer AS "overdueTasks",
+      COALESCE(SUM(CASE WHEN visible_task.status NOT IN ('Completed') THEN visible_task.estimated_hours END), 0)::float AS "totalEstimatedHours",
+      COALESCE(SUM(visible_task.actual_hours), 0)::float AS "totalActualHours"
     FROM users u
     LEFT JOIN teams t ON u.team_id = t.id
-    LEFT JOIN tasks ON u.id = tasks.assigned_to_user_id
-    WHERE u.is_active = true
+    LEFT JOIN (
+      SELECT visible_task.*
+      FROM tasks visible_task
+      JOIN projects visible_project ON visible_project.id = visible_task.project_id
+      WHERE ${taskVisibility.sql}
+    ) visible_task ON u.id = visible_task.assigned_to_user_id
+    WHERE u.is_active = true AND (${userVisibility})
     GROUP BY u.id, u.name, u.email, u.role, u.designation, u.department, t.id, t.name
     ORDER BY "totalTasks" DESC, u.name ASC
-  `);
+  `, values);
   return rows;
 }
 
-export async function getDashboardMetrics(userId?: number, role?: UserRole) {
-  const totalTasksRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM tasks");
-  const completedTasksRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM tasks WHERE status = 'Completed'");
-  const inProgressTasksRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM tasks WHERE status = 'In Progress'");
-  const pendingTasksRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM tasks WHERE status IN ('To Do', 'Backlog')");
-  const inReviewTasksRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM tasks WHERE status = 'In Review'");
-  const blockedTasksRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM tasks WHERE status = 'Blocked'");
-  const overdueTasksRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM tasks WHERE due_date < CURRENT_DATE AND status != 'Completed'");
-  const projectsCountRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM projects");
-  const usersCountRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM users WHERE is_active = true");
-  const teamsCountRes = await pool.query<{ count: string }>("SELECT COUNT(*) FROM teams");
+export async function getDashboardMetrics(viewer: AccessUser) {
+  const taskScope = taskVisibilityClause(viewer, "t", "p", 1);
+  const taskMetricsRes = await pool.query(`
+    SELECT
+      COUNT(*)::integer AS "totalTasks",
+      COUNT(*) FILTER (WHERE t.status = 'Completed')::integer AS "completedTasks",
+      COUNT(*) FILTER (WHERE t.status = 'In Progress')::integer AS "inProgressTasks",
+      COUNT(*) FILTER (WHERE t.status IN ('To Do', 'Backlog'))::integer AS "pendingTasks",
+      COUNT(*) FILTER (WHERE t.status = 'In Review')::integer AS "inReviewTasks",
+      COUNT(*) FILTER (WHERE t.status = 'Blocked')::integer AS "blockedTasks",
+      COUNT(*) FILTER (WHERE t.due_date < CURRENT_DATE AND t.status <> 'Completed')::integer AS "overdueTasks"
+    FROM tasks t JOIN projects p ON p.id = t.project_id
+    WHERE ${taskScope.sql}
+  `, taskScope.values);
+  const projectScope = projectVisibilityClause(viewer, "p", 1);
+  const projectsCountRes = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) FROM projects p WHERE p.status = 'Active' AND ${projectScope.sql}`,
+    projectScope.values,
+  );
+  const userScope = viewer.role === "Admin"
+    ? { sql: "TRUE", values: [] as unknown[] }
+    : viewer.role === "Individual"
+    ? { sql: "u.id = $1", values: [viewer.id] }
+    : {
+        sql: `(u.id = $1 OR EXISTS (
+          SELECT 1 FROM team_members target_membership
+          JOIN teams authorized_team ON authorized_team.id = target_membership.team_id
+          WHERE target_membership.user_id = u.id
+            AND (authorized_team.manager_id = $1 OR authorized_team.lead_id = $1)
+        ))`,
+        values: [viewer.id],
+      };
+  const usersCountRes = await pool.query<{ count: string }>(
+    `SELECT COUNT(*) FROM users u WHERE u.is_active = true AND ${userScope.sql}`,
+    userScope.values,
+  );
+  const teamsCount = (await listTeams(viewer)).length;
 
   let personalMetrics = null;
-  if (userId) {
+  if (viewer.id) {
     const myTasksRes = await pool.query(`
       SELECT 
         COUNT(*)::integer AS "myTotalTasks",
@@ -1540,7 +1999,7 @@ export async function getDashboardMetrics(userId?: number, role?: UserRole) {
         COUNT(CASE WHEN due_date < CURRENT_DATE AND status != 'Completed' THEN 1 END)::integer AS "myOverdue"
       FROM tasks
       WHERE assigned_to_user_id = $1 OR EXISTS (SELECT 1 FROM task_collaborators tc WHERE tc.task_id = tasks.id AND tc.user_id = $1)
-    `, [userId]);
+    `, [viewer.id]);
     personalMetrics = myTasksRes.rows[0];
   }
 
@@ -1558,25 +2017,81 @@ export async function getDashboardMetrics(userId?: number, role?: UserRole) {
       tah.created_at AS "createdAt"
     FROM task_activity_history tah
     JOIN tasks t ON tah.task_id = t.id
+    JOIN projects p ON p.id = t.project_id
     JOIN users u ON tah.actor_user_id = u.id
+    WHERE ${taskScope.sql}
     ORDER BY tah.id DESC
     LIMIT 10
-  `);
+  `, taskScope.values);
+
+  const taskMetrics = taskMetricsRes.rows[0];
 
   return {
-    totalTasks: Number(totalTasksRes.rows[0].count),
-    completedTasks: Number(completedTasksRes.rows[0].count),
-    inProgressTasks: Number(inProgressTasksRes.rows[0].count),
-    pendingTasks: Number(pendingTasksRes.rows[0].count),
-    inReviewTasks: Number(inReviewTasksRes.rows[0].count),
-    blockedTasks: Number(blockedTasksRes.rows[0].count),
-    overdueTasks: Number(overdueTasksRes.rows[0].count),
+    totalTasks: taskMetrics.totalTasks,
+    completedTasks: taskMetrics.completedTasks,
+    inProgressTasks: taskMetrics.inProgressTasks,
+    pendingTasks: taskMetrics.pendingTasks,
+    inReviewTasks: taskMetrics.inReviewTasks,
+    blockedTasks: taskMetrics.blockedTasks,
+    overdueTasks: taskMetrics.overdueTasks,
     totalProjects: Number(projectsCountRes.rows[0].count),
     totalUsers: Number(usersCountRes.rows[0].count),
-    totalTeams: Number(teamsCountRes.rows[0].count),
+    totalTeams: teamsCount,
     personal: personalMetrics,
     recentActivity: recentActivityRes.rows,
   };
+}
+
+export async function listOrganizationActivity(viewer: AccessUser) {
+  const taskScope = taskVisibilityClause(viewer, "t", "p", 1);
+  const projectScope = projectVisibilityClause(viewer, "p", 1);
+  const userScope = viewer.role === "Admin"
+    ? "TRUE"
+    : `(uah.actor_user_id = $1 OR EXISTS (
+        SELECT 1 FROM users target_user
+        JOIN teams managed_team ON managed_team.manager_id = $1 OR managed_team.lead_id = $1
+        WHERE target_user.id = uah.target_user_id
+          AND (target_user.team_id = managed_team.id OR EXISTS (
+            SELECT 1 FROM team_members tm WHERE tm.team_id = managed_team.id AND tm.user_id = target_user.id
+          ))
+      ))`;
+  const userValues = viewer.role === "Admin" ? [] : [viewer.id];
+  const [taskEvents, projectEvents, userEvents] = await Promise.all([
+    pool.query(`
+      SELECT tah.id, tah.task_id AS "entityId", t.title AS "entityName", tah.action,
+        COALESCE(tah.reason, NULLIF(concat_ws(': ', tah.field_changed, tah.new_value), ''), tah.action) AS details,
+        tah.actor_user_id AS "actorUserId", u.name AS "actorName", tah.created_at AS "createdAt"
+      FROM task_activity_history tah
+      JOIN tasks t ON t.id = tah.task_id
+      JOIN projects p ON p.id = t.project_id
+      JOIN users u ON u.id = tah.actor_user_id
+      WHERE ${taskScope.sql}
+    `, taskScope.values),
+    pool.query(`
+      SELECT pah.id, pah.project_id AS "entityId", p.name AS "entityName", pah.action,
+        pah.details, pah.actor_user_id AS "actorUserId", u.name AS "actorName", pah.created_at AS "createdAt"
+      FROM project_activity_history pah
+      JOIN projects p ON p.id = pah.project_id
+      JOIN users u ON u.id = pah.actor_user_id
+      WHERE ${projectScope.sql}
+    `, projectScope.values),
+    pool.query(`
+      SELECT uah.id, uah.target_user_id AS "entityId", target.name AS "entityName", uah.action,
+        uah.reason AS details, uah.actor_user_id AS "actorUserId", actor.name AS "actorName", uah.created_at AS "createdAt"
+      FROM user_audit_history uah
+      JOIN users target ON target.id = uah.target_user_id
+      JOIN users actor ON actor.id = uah.actor_user_id
+      WHERE ${userScope}
+    `, userValues),
+  ]);
+
+  return [
+    ...taskEvents.rows.map((event) => ({ ...event, eventType: "Task", id: `task-${event.id}` })),
+    ...projectEvents.rows.map((event) => ({ ...event, eventType: "Project", id: `project-${event.id}` })),
+    ...userEvents.rows.map((event) => ({ ...event, eventType: "Employee", id: `employee-${event.id}` })),
+  ]
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+    .slice(0, 100);
 }
 
 // ----------------- Legacy Project Allotments & Employees Functions ----------------- //
@@ -1734,7 +2249,24 @@ export async function updateProjectAllotmentAssistance(id: number, assistanceBy:
   return rows[0] ?? null;
 }
 
-export async function listDailyProgressReports(reportDate: string) {
+export async function listDailyProgressReports(reportDate: string, viewer: AccessUser) {
+  const values: unknown[] = [reportDate];
+  let visibility = "TRUE";
+  if (viewer.role === "Individual") {
+    visibility = "d.user_id = $2";
+    values.push(viewer.id);
+  } else if (viewer.role !== "Admin") {
+    const projectScope = projectVisibilityClause(viewer, "visible_project", 3);
+    visibility = `(d.user_id = $2 OR EXISTS (
+      SELECT 1 FROM team_members actor_membership
+      JOIN team_members report_membership ON report_membership.team_id = actor_membership.team_id
+      WHERE actor_membership.user_id = $2 AND report_membership.user_id = d.user_id
+    ) OR EXISTS (
+      SELECT 1 FROM projects visible_project
+      WHERE visible_project.id = d.project_id AND ${projectScope.sql}
+    ))`;
+    values.push(viewer.id, ...projectScope.values);
+  }
   const { rows } = await pool.query<DailyProgressReport>(
     `SELECT
        d.id,
@@ -1751,9 +2283,9 @@ export async function listDailyProgressReports(reportDate: string) {
      FROM daily_progress_reports d
      LEFT JOIN projects p ON d.project_id = p.id
      LEFT JOIN tasks t ON d.task_id = t.id
-     WHERE d.report_date = $1::date
+     WHERE d.report_date = $1::date AND ${visibility}
      ORDER BY d.employee_name`,
-    [reportDate],
+    values,
   );
   return rows;
 }

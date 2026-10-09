@@ -228,6 +228,18 @@ export type DashboardMetrics = {
   }>;
 };
 
+export type ActivityEvent = {
+  id: string;
+  eventType: "Task" | "Project" | "Employee";
+  entityId: number;
+  entityName: string;
+  action: string;
+  details: string;
+  actorUserId: number;
+  actorName: string;
+  createdAt: string;
+};
+
 export type EmployeeRecord = {
   id: number;
   name: string;
@@ -326,6 +338,7 @@ export function createUser(userData: {
   department: string;
   designation: string;
   teamId?: number | null;
+  projectIds?: number[];
 }) {
   return request<User>("/api/users", {
     method: "POST",
@@ -337,6 +350,13 @@ export function updateUser(id: number, updates: Partial<User>) {
   return request<User>(`/api/users/${id}`, {
     method: "PATCH",
     body: JSON.stringify(updates),
+  });
+}
+
+export function deactivateEmployee(id: number, input: { reassignToUserId?: number; reason?: string }) {
+  return request<{ user: User | null; reassignedTaskCount: number }>(`/api/users/${id}/deactivate`, {
+    method: "PATCH",
+    body: JSON.stringify(input),
   });
 }
 
@@ -521,6 +541,10 @@ export function getTeamWorkloadAnalytics() {
 
 export function getDashboardMetrics() {
   return request<DashboardMetrics>("/api/analytics/dashboard");
+}
+
+export function getActivityLog() {
+  return request<ActivityEvent[]>("/api/activity");
 }
 
 // Legacy APIs

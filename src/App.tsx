@@ -47,7 +47,9 @@ import {
   createProject,
   createTask,
   createUser,
+  deactivateEmployee,
   getCurrentUser,
+  getActivityLog,
   getDailyProgressReports,
   getDashboardMetrics,
   getNotifications,
@@ -70,6 +72,7 @@ import {
   taskStatusOptions,
   toggleSubtask,
   type DailyProgressReport,
+  type ActivityEvent,
   type DashboardMetrics,
   type Notification,
   type Project,
@@ -143,6 +146,7 @@ type ViewMode =
   | "daily-reports"
   | "calendar"
   | "analytics"
+  | "activity"
   | "allotments"
   | "workflows"
   | "settings";
@@ -159,6 +163,7 @@ export default function App() {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [allotments, setAllotments] = useState<ProjectAllotment[]>([]);
   const [dailyReports, setDailyReports] = useState<DailyProgressReport[]>([]);
+  const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
 
   // Navigation & UI controls
   const [currentView, setCurrentView] = useState<ViewMode>("overview");
@@ -175,6 +180,11 @@ export default function App() {
   const [filterPriority, setFilterPriority] = useState<string>("All");
   const [filterAssignee, setFilterAssignee] = useState<string>("All");
   const [filterRole, setFilterRole] = useState<string>("All");
+  const [filterDue, setFilterDue] = useState<string>("All");
+  const [employeeSearch, setEmployeeSearch] = useState("");
+  const [employeeTeamFilter, setEmployeeTeamFilter] = useState("All");
+  const [employeeStatusFilter, setEmployeeStatusFilter] = useState("All");
+  const [employeePage, setEmployeePage] = useState(0);
   const [reportDate, setReportDate] = useState<string>(localDateString());
 
   // Task Detail Modal / Side Panel
@@ -244,6 +254,9 @@ export default function App() {
 
   // User Management Modal (Admin)
   const [isUserModalOpen, setIsUserModalOpen] = useState(false);
+  const [deactivationTarget, setDeactivationTarget] = useState<AppUser | null>(null);
+  const [replacementUserId, setReplacementUserId] = useState<number | null>(null);
+  const [deactivationReason, setDeactivationReason] = useState("");
   const [userFormData, setUserFormData] = useState({
     name: "",
     email: "",
@@ -251,15 +264,16 @@ export default function App() {
     department: "Technical",
     designation: "Software Engineer",
     teamId: 0,
+    projectIds: [] as number[],
   });
 
   // Initial Data Fetch
   const refreshAllData = async () => {
     try {
       setIsLoading(true);
-      const [u, users, teams, projs, tasks, metricsData, workload, notifs, legacyAllotments] =
+      const u = await getCurrentUser();
+      const [users, teams, projs, tasks, metricsData, workload, notifs, legacyAllotments] =
         await Promise.all([
-          getCurrentUser(),
           getUsers(),
           getTeams(),
           getProjects(),
@@ -267,7 +281,7 @@ export default function App() {
           getDashboardMetrics(),
           getTeamWorkloadAnalytics(),
           getNotifications(),
-          getProjectAllotments(),
+          u.role === "Admin" ? getProjectAllotments() : Promise.resolve([] as ProjectAllotment[]),
         ]);
 
       setCurrentUser(u);
@@ -341,9 +355,11 @@ export default function App() {
         if (!isAssigned && !isCollab) return false;
       }
       if (filterProject !== "All" && String(t.projectId) !== filterProject) return false;
-      if (filterStatus !== "All" && t.status !== filterStatus) return false;
+      if (filterStatus === "Pending" && !["To Do", "Backlog"].includes(t.status)) return false;
+      if (filterStatus !== "All" && filterStatus !== "Pending" && t.status !== filterStatus) return false;
       if (filterPriority !== "All" && t.priority !== filterPriority) return false;
       if (filterAssignee !== "All" && String(t.assignedToUserId) !== filterAssignee) return false;
+      if (filterDue === "Overdue" && (!t.dueDate || t.dueDate >= localDateString() || t.status === "Completed")) return false;
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
         const match =
@@ -356,7 +372,7 @@ export default function App() {
       }
       return true;
     });
-  }, [tasksList, currentView, currentUser, filterProject, filterStatus, filterPriority, filterAssignee, searchQuery]);
+  }, [tasksList, currentView, currentUser, filterProject, filterStatus, filterPriority, filterAssignee, filterDue, searchQuery]);
 
   // Action Handlers
   const handleOpenCreateTask = () => {
@@ -568,11 +584,41 @@ export default function App() {
         department: userFormData.department.trim(),
         designation: userFormData.designation.trim(),
         teamId: userFormData.teamId || undefined,
+        projectIds: userFormData.projectIds,
       });
       setUsersList((prev) => [...prev, u]);
       setIsUserModalOpen(false);
       setSuccessMessage(`User ${u.name} registered as ${u.role}.`);
       setTimeout(() => setSuccessMessage(""), 3000);
+    } catch (err: any) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  const handleDeactivateEmployee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!deactivationTarget) return;
+    const activeTaskCount = tasksList.filter(
+      (task) => task.assignedToUserId === deactivationTarget.id && task.status !== "Completed",
+    ).length;
+    if (activeTaskCount > 0 && !replacementUserId) {
+      setErrorMessage("Select an active replacement for this employee's open tasks.");
+      return;
+    }
+    try {
+      const result = await deactivateEmployee(deactivationTarget.id, {
+        reassignToUserId: replacementUserId || undefined,
+        reason: deactivationReason.trim() || undefined,
+      });
+      if (result.user) {
+        setUsersList((previous) => previous.map((user) => user.id === result.user?.id ? result.user! : user));
+      }
+      setDeactivationTarget(null);
+      setReplacementUserId(null);
+      setDeactivationReason("");
+      setSuccessMessage(`${deactivationTarget.name} was deactivated. ${result.reassignedTaskCount} open task(s) reassigned; history retained.`);
+      await refreshAllData();
+      setTimeout(() => setSuccessMessage(""), 4000);
     } catch (err: any) {
       setErrorMessage(err.message);
     }
@@ -585,7 +631,8 @@ export default function App() {
       role: "Individual",
       department: "Technical",
       designation: "Software Engineer",
-      teamId: teamsList[0]?.id || 0,
+      teamId: currentUser?.teamId || teamsList[0]?.id || 0,
+      projectIds: [],
     });
     setIsUserModalOpen(true);
     setIsMobileMenuOpen(false);
@@ -621,6 +668,7 @@ export default function App() {
   const role = currentUser?.role || "Individual";
   const canManageProjects = role === "Admin" || role === "Manager";
   const canManageUsers = role === "Admin" || role === "Team Lead";
+  const canManageEmployees = role === "Admin" || role === "Manager" || role === "Team Lead";
   const canAssignTasks = role === "Admin" || role === "Manager" || role === "Team Lead";
 
   // Grouped Team Hierarchy for Team Management Module
@@ -629,12 +677,46 @@ export default function App() {
   }, [usersList]);
 
   const individualContributors = useMemo(() => {
-    return usersList.filter((u) => u.role === "Individual");
-  }, [usersList]);
+    const query = employeeSearch.trim().toLocaleLowerCase();
+    return usersList.filter((user) => {
+      if (user.role !== "Individual") return false;
+      if (employeeTeamFilter !== "All" && String(user.teamId || "") !== employeeTeamFilter) return false;
+      if (employeeStatusFilter === "Active" && !user.isActive) return false;
+      if (employeeStatusFilter === "Inactive" && user.isActive) return false;
+      if (query && !`${user.name} ${user.email} ${user.designation}`.toLocaleLowerCase().includes(query)) return false;
+      return true;
+    });
+  }, [usersList, employeeSearch, employeeTeamFilter, employeeStatusFilter]);
 
   const adminUsers = useMemo(() => {
     return usersList.filter((u) => u.role === "Admin");
   }, [usersList]);
+  const employeePageSize = 9;
+  const employeePageCount = Math.max(1, Math.ceil(individualContributors.length / employeePageSize));
+  const employeePageUsers = individualContributors.slice(employeePage * employeePageSize, (employeePage + 1) * employeePageSize);
+
+  const deactivationActiveTaskCount = deactivationTarget
+    ? tasksList.filter((task) => task.assignedToUserId === deactivationTarget.id && task.status !== "Completed").length
+    : 0;
+  const deactivationReplacementUsers = deactivationTarget
+    ? usersList.filter((user) => user.isActive && user.id !== deactivationTarget.id && (role === "Admin" || user.teamId === deactivationTarget.teamId))
+    : [];
+  const dashboardKpis: Array<{ label: string; value: number; icon: LucideIcon; tone: string; view: ViewMode; status?: string; due?: string }> = [
+    { label: role === "Individual" ? "My Assigned Tasks" : "Total Tasks", value: role === "Individual" ? metrics?.personal?.myTotalTasks || 0 : metrics?.totalTasks || 0, icon: ListTodo, tone: "text-slate-900", view: role === "Individual" ? "my-tasks" : "all-tasks" },
+    { label: "Completed", value: metrics?.completedTasks || 0, icon: CheckCircle2, tone: "text-emerald-600", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "Completed" },
+    { label: "In Progress", value: metrics?.inProgressTasks || 0, icon: Clock, tone: "text-teal-700", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "In Progress" },
+    { label: "Overdue", value: metrics?.overdueTasks || 0, icon: CalendarIcon, tone: "text-rose-600", view: role === "Individual" ? "my-tasks" : "all-tasks", due: "Overdue" },
+    { label: "Blocked", value: metrics?.blockedTasks || 0, icon: AlertOctagon, tone: "text-rose-700", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "Blocked" },
+    { label: "Active Projects", value: metrics?.totalProjects || 0, icon: FolderGit2, tone: "text-emerald-700", view: "projects" },
+    { label: role === "Individual" ? "My Tasks" : role === "Admin" ? "Employees" : "Team Members", value: role === "Individual" ? metrics?.personal?.myTotalTasks || 0 : metrics?.totalUsers || 0, icon: Users, tone: "text-slate-900", view: canManageEmployees ? "team-management" : "my-tasks" },
+    { label: "Pending", value: metrics?.pendingTasks || 0, icon: FileCheck, tone: "text-amber-700", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "Pending" },
+  ];
+  const maxTeamTasks = Math.max(1, ...workloadData.map((member) => member.totalTasks));
+  const dueSoonDate = localDateString(new Date(Date.now() + 3 * 86400000));
+  const urgentAttentionTasks = tasksList
+    .filter((task) => task.status === "Blocked" || (task.status !== "Completed" && task.dueDate !== null && task.dueDate !== undefined && task.dueDate <= dueSoonDate))
+    .sort((left, right) => (left.dueDate || "9999-12-31").localeCompare(right.dueDate || "9999-12-31"))
+    .slice(0, 5);
 
   return (
     <div className="h-screen overflow-hidden bg-slate-50 text-slate-900 font-sans flex flex-col">
@@ -661,7 +743,7 @@ export default function App() {
               className="bg-transparent font-bold text-emerald-950 outline-none cursor-pointer pr-1"
             >
               {usersList.map((u) => (
-                <option key={u.id} value={u.id}>
+                u.isActive && <option key={u.id} value={u.id}>
                   {u.name} {u.name === "Admin" ? "(Organization Admin)" : `(${u.role})`}
                 </option>
               ))}
@@ -848,25 +930,49 @@ export default function App() {
               )}
             </button>
 
-            <button
-              onClick={() => {
-                setCurrentView("all-tasks");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition ${
-                currentView === "all-tasks"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
-              }`}
-            >
-              <div className="flex items-center gap-3">
-                <ListTodo className="w-4 h-4 text-emerald-600" />
-                <span>All Tasks</span>
-              </div>
-              <span className="bg-slate-100 text-slate-700 text-xs px-2 py-0.5 rounded-full font-semibold">
-                {tasksList.length}
-              </span>
-            </button>
+            {role !== "Individual" && (
+              <button
+                onClick={() => {
+                  setCurrentView("all-tasks");
+                  setIsMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition ${
+                  currentView === "all-tasks"
+                    ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
+                    : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <ListTodo className="w-4 h-4 text-emerald-600" />
+                  <span>All Tasks</span>
+                </div>
+                <span className="bg-slate-100 text-slate-700 text-xs px-2 py-0.5 rounded-full font-semibold">
+                  {tasksList.length}
+                </span>
+              </button>
+            )}
+
+            {role !== "Individual" && (
+              <button
+                onClick={async () => {
+                  setCurrentView("activity");
+                  setIsMobileMenuOpen(false);
+                  try {
+                    setActivityEvents(await getActivityLog());
+                  } catch (err: any) {
+                    setErrorMessage(err.message);
+                  }
+                }}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
+                  currentView === "activity"
+                    ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
+                    : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                }`}
+              >
+                <Activity className="w-4 h-4 text-emerald-600" />
+                <span>Activity Logs</span>
+              </button>
+            )}
 
             <button
               onClick={() => {
@@ -903,20 +1009,22 @@ export default function App() {
               </span>
             </button>
 
-            <button
-              onClick={() => {
-                setCurrentView("team-management");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
-                currentView === "team-management"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
-              }`}
-            >
-              <Users className="w-4 h-4 text-emerald-600" />
-              <span>Team Management</span>
-            </button>
+            {canManageEmployees && (
+              <button
+                onClick={() => {
+                  setCurrentView("team-management");
+                  setIsMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
+                  currentView === "team-management"
+                    ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
+                    : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                }`}
+              >
+                <Users className="w-4 h-4 text-emerald-600" />
+                <span>Employees & Teams</span>
+              </button>
+            )}
             {canManageUsers && (
               <button
                 onClick={openCreateProfile}
@@ -927,6 +1035,7 @@ export default function App() {
               </button>
             )}
 
+            {role !== "Individual" && (
             <button
               onClick={() => {
                 setCurrentView("workload");
@@ -941,6 +1050,7 @@ export default function App() {
               <BarChart3 className="w-4 h-4 text-emerald-600" />
               <span>Team Workload</span>
             </button>
+            )}
 
             <button
               onClick={() => {
@@ -976,6 +1086,7 @@ export default function App() {
               <span>Calendar</span>
             </button>
 
+            {role !== "Individual" && (
             <button
               onClick={() => {
                 setCurrentView("analytics");
@@ -990,22 +1101,26 @@ export default function App() {
               <TrendingUp className="w-4 h-4 text-emerald-600" />
               <span>Analytics</span>
             </button>
+            )}
 
-            <button
-              onClick={() => {
-                setCurrentView("allotments");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
-                currentView === "allotments"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
-              }`}
-            >
-              <Network className="w-4 h-4 text-emerald-600" />
-              <span>Project Allotments</span>
-            </button>
+            {role === "Admin" && (
+              <button
+                onClick={() => {
+                  setCurrentView("allotments");
+                  setIsMobileMenuOpen(false);
+                }}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
+                  currentView === "allotments"
+                    ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
+                    : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                }`}
+              >
+                <Network className="w-4 h-4 text-emerald-600" />
+                <span>Project Allotments</span>
+              </button>
+            )}
 
+            {role !== "Individual" && (
             <button
               onClick={() => {
                 setCurrentView("workflows");
@@ -1020,7 +1135,9 @@ export default function App() {
               <Workflow className="w-4 h-4 text-emerald-600" />
               <span>Workflows & Roles</span>
             </button>
+            )}
 
+            {role === "Admin" && (
             <button
               onClick={() => {
                 setCurrentView("settings");
@@ -1035,6 +1152,7 @@ export default function App() {
               <Settings className="w-4 h-4 text-emerald-600" />
               <span>Settings</span>
             </button>
+            )}
           </nav>
 
           <div className="p-3 border-t border-slate-100 text-xs text-slate-500">
@@ -1072,6 +1190,7 @@ export default function App() {
                         Task Manager Portal
                       </h1>
                       <p className="text-emerald-100 text-xs sm:text-sm mt-1 max-w-2xl">
+                        Welcome, {role === "Admin" ? "Admin" : currentUser?.name}. {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}.{" "}
                         {role === "Admin" && "Organization-wide governance. Manage users, projects, teams, and high-level escalations."}
                         {role === "Manager" && "Team Lead & Manager Console. Oversee projects, create tasks, assign work, monitor progress, and review deliverables."}
                         {role === "Team Lead" && "Technical Lead execution hub. Supervise team execution, assign work, and conduct technical reviews."}
@@ -1109,55 +1228,74 @@ export default function App() {
                           New Project
                         </button>
                       )}
+                      {canManageUsers && (
+                        <button
+                          onClick={openCreateProfile}
+                          className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl transition flex items-center gap-1.5"
+                        >
+                          <UserPlus className="w-4 h-4" />
+                          Add Employee
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setCurrentView("daily-reports")}
+                        className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl transition flex items-center gap-1.5"
+                      >
+                        <FileSpreadsheet className="w-4 h-4" />
+                        View Reports
+                      </button>
                     </div>
                   </div>
 
                   {/* Summary Metric Cards */}
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div className="bg-white p-4 sm:p-5 rounded-xl border border-emerald-100 card-hover shadow-xs">
-                      <div className="flex items-center justify-between text-slate-500 mb-2">
-                        <span className="text-xs font-bold uppercase tracking-wider">Total Tasks</span>
-                        <ListTodo className="w-4 h-4 text-emerald-600" />
-                      </div>
-                      <p className="text-2xl sm:text-3xl font-black text-slate-900 font-display">
-                        {metrics?.totalTasks || 0}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1">Across all active projects</p>
-                    </div>
-
-                    <div className="bg-white p-4 sm:p-5 rounded-xl border border-emerald-100 card-hover shadow-xs">
-                      <div className="flex items-center justify-between text-slate-500 mb-2">
-                        <span className="text-xs font-bold uppercase tracking-wider">In Progress</span>
-                        <Clock className="w-4 h-4 text-emerald-600" />
-                      </div>
-                      <p className="text-2xl sm:text-3xl font-black text-emerald-600 font-display">
-                        {metrics?.inProgressTasks || 0}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1">Actively being executed</p>
-                    </div>
-
-                    <div className="bg-white p-4 sm:p-5 rounded-xl border border-emerald-100 card-hover shadow-xs">
-                      <div className="flex items-center justify-between text-slate-500 mb-2">
-                        <span className="text-xs font-bold uppercase tracking-wider">Blocked Issues</span>
-                        <AlertOctagon className="w-4 h-4 text-rose-600" />
-                      </div>
-                      <p className="text-2xl sm:text-3xl font-black text-rose-600 font-display">
-                        {metrics?.blockedTasks || 0}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1">Requires lead/mgr action</p>
-                    </div>
-
-                    <div className="bg-white p-4 sm:p-5 rounded-xl border border-emerald-100 card-hover shadow-xs">
-                      <div className="flex items-center justify-between text-slate-500 mb-2">
-                        <span className="text-xs font-bold uppercase tracking-wider">In Review</span>
-                        <FileCheck className="w-4 h-4 text-teal-600" />
-                      </div>
-                      <p className="text-2xl sm:text-3xl font-black text-teal-600 font-display">
-                        {metrics?.inReviewTasks || 0}
-                      </p>
-                      <p className="text-xs text-slate-500 mt-1">Awaiting approval</p>
-                    </div>
+                    {dashboardKpis.map((kpi) => {
+                      const Icon = kpi.icon;
+                      return (
+                        <button
+                          key={kpi.label}
+                          onClick={() => {
+                            setCurrentView(kpi.view);
+                            setFilterStatus(kpi.status || "All");
+                            setFilterDue(kpi.due || "All");
+                            setFilterProject("All");
+                          }}
+                          className="w-full bg-white p-4 sm:p-5 rounded-xl border border-emerald-100 card-hover shadow-xs text-left"
+                        >
+                          <div className="flex items-center justify-between text-slate-500 mb-2">
+                            <span className="text-xs font-bold uppercase">{kpi.label}</span>
+                            <Icon className={`w-4 h-4 ${kpi.tone}`} />
+                          </div>
+                          <p className={`text-2xl sm:text-3xl font-black font-display ${kpi.tone}`}>{kpi.value}</p>
+                          <span className="sr-only">Open {kpi.label}</span>
+                        </button>
+                      );
+                    })}
                   </div>
+
+                  {urgentAttentionTasks.length > 0 && (
+                    <section className="bg-white rounded-xl border border-amber-200 p-5 shadow-xs" aria-labelledby="urgent-attention-title">
+                      <div className="flex items-center justify-between mb-3">
+                        <h2 id="urgent-attention-title" className="font-bold text-base text-slate-900 flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-600" /> Urgent Attention
+                        </h2>
+                        <span className="text-xs text-slate-500">Blocked or due within 3 days</span>
+                      </div>
+                      <div className="divide-y divide-slate-100">
+                        {urgentAttentionTasks.map((task) => (
+                          <button key={task.id} onClick={() => setSelectedTaskId(task.id)} className="w-full py-2.5 text-left flex items-center justify-between gap-4 hover:bg-amber-50/40">
+                            <span className="min-w-0">
+                              <span className="block text-sm font-semibold text-slate-900 truncate">{task.title}</span>
+                              <span className="text-xs text-slate-500">{task.taskCode} · {task.projectName}</span>
+                            </span>
+                            <span className={`shrink-0 text-xs font-bold ${task.status === "Blocked" ? "text-rose-700" : "text-amber-700"}`}>
+                              {task.status === "Blocked" ? "Blocked" : `Due ${task.dueDate}`}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  )}
 
                   {/* Role Specific Section Grid */}
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1338,7 +1476,7 @@ export default function App() {
               )}
 
               {/* ----------------- VIEW 2: ALL TASKS & MY TASKS MATRIX ----------------- */}
-              {(currentView === "all-tasks" || currentView === "my-tasks") && (
+              {((currentView === "my-tasks") || (currentView === "all-tasks" && role !== "Individual")) && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div>
@@ -1400,6 +1538,7 @@ export default function App() {
                           {s}
                         </option>
                       ))}
+                      <option value="Pending">Pending (To Do + Backlog)</option>
                     </select>
 
                     <select
@@ -1413,6 +1552,15 @@ export default function App() {
                           {p}
                         </option>
                       ))}
+                    </select>
+
+                    <select
+                      value={filterDue}
+                      onChange={(e) => setFilterDue(e.target.value)}
+                      className="text-xs sm:text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 outline-none font-medium text-slate-700"
+                    >
+                      <option value="All">All Due Dates</option>
+                      <option value="Overdue">Overdue</option>
                     </select>
 
                     {currentView !== "my-tasks" && (
@@ -1686,7 +1834,7 @@ export default function App() {
               )}
 
               {/* ----------------- VIEW 5: DEDICATED TEAM MANAGEMENT MODULE ----------------- */}
-              {currentView === "team-management" && (
+              {currentView === "team-management" && canManageEmployees && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div>
@@ -1754,12 +1902,28 @@ export default function App() {
                                 <p className="text-xs text-slate-500">{admin.designation} • {admin.email}</p>
                               </div>
                             </div>
-                            <button
-                              onClick={() => handleSwitchUser(admin.id)}
-                              className="text-xs text-emerald-700 bg-emerald-100/80 hover:bg-emerald-200 font-bold px-3 py-1.5 rounded-lg transition"
-                            >
-                              Login as Admin
-                            </button>
+                            <div className="flex items-center gap-2">
+                              {admin.isActive && (
+                                <button
+                                  onClick={() => handleSwitchUser(admin.id)}
+                                  className="text-xs text-emerald-700 bg-emerald-100/80 hover:bg-emerald-200 font-bold px-3 py-1.5 rounded-lg transition"
+                                >
+                                  Login as Admin
+                                </button>
+                              )}
+                              {admin.isActive && adminUsers.filter((user) => user.isActive).length > 1 && (
+                                <button
+                                  onClick={() => {
+                                    setDeactivationTarget(admin);
+                                    setReplacementUserId(usersList.find((user) => user.isActive && user.id !== admin.id)?.id || null);
+                                    setDeactivationReason("");
+                                  }}
+                                  className="text-xs text-rose-700 border border-rose-200 hover:bg-rose-50 font-bold px-3 py-1.5 rounded-lg transition"
+                                >
+                                  Remove Employee
+                                </button>
+                              )}
+                            </div>
                           </div>
                         ))}
                       </div>
@@ -1800,8 +1964,8 @@ export default function App() {
                                     <p className="text-xs text-slate-500">{lead.designation}</p>
                                   </div>
                                 </div>
-                                <span className="badge bg-teal-50 text-teal-800 font-bold">
-                                  {lead.role}
+                                <span className={`badge ${lead.isActive ? "bg-teal-50 text-teal-800" : "bg-slate-100 text-slate-500"} font-bold`}>
+                                  {lead.isActive ? lead.role : `${lead.role} · Inactive`}
                                 </span>
                               </div>
 
@@ -1821,12 +1985,26 @@ export default function App() {
                               </div>
 
                               <div className="flex justify-end gap-2 pt-1">
-                                <button
-                                  onClick={() => handleSwitchUser(lead.id)}
-                                  className="text-xs text-teal-700 bg-teal-50 hover:bg-teal-100 font-bold px-3 py-1.5 rounded-lg transition"
-                                >
-                                  Act as {lead.name}
-                                </button>
+                                {lead.isActive && (
+                                  <button
+                                    onClick={() => handleSwitchUser(lead.id)}
+                                    className="text-xs text-teal-700 bg-teal-50 hover:bg-teal-100 font-bold px-3 py-1.5 rounded-lg transition"
+                                  >
+                                    Act as {lead.name}
+                                  </button>
+                                )}
+                                {role === "Admin" && lead.isActive && (
+                                  <button
+                                    onClick={() => {
+                                      setDeactivationTarget(lead);
+                                      setReplacementUserId(usersList.find((user) => user.isActive && user.id !== lead.id)?.id || null);
+                                      setDeactivationReason("");
+                                    }}
+                                    className="text-xs text-rose-700 border border-rose-200 hover:bg-rose-50 font-bold px-3 py-1.5 rounded-lg transition"
+                                  >
+                                    Remove Employee
+                                  </button>
+                                )}
                               </div>
                             </div>
                           );
@@ -1854,10 +2032,46 @@ export default function App() {
                       </div>
 
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                        {individualContributors.map((ic) => {
+                        <div className="col-span-full grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="relative">
+                            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                            <input
+                              type="search"
+                              aria-label="Search employees"
+                              placeholder="Search name, email, designation"
+                              value={employeeSearch}
+                              onChange={(e) => { setEmployeeSearch(e.target.value); setEmployeePage(0); }}
+                              className="w-full pl-9 pr-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                            />
+                          </div>
+                          <select
+                            aria-label="Filter employees by team"
+                            value={employeeTeamFilter}
+                            onChange={(e) => { setEmployeeTeamFilter(e.target.value); setEmployeePage(0); }}
+                            className="px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                          >
+                            <option value="All">All Teams</option>
+                            {teamsList.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+                          </select>
+                          <select
+                            aria-label="Filter employees by status"
+                            value={employeeStatusFilter}
+                            onChange={(e) => { setEmployeeStatusFilter(e.target.value); setEmployeePage(0); }}
+                            className="px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                          >
+                            <option value="All">All Statuses</option>
+                            <option value="Active">Active</option>
+                            <option value="Inactive">Inactive</option>
+                          </select>
+                        </div>
+                        {employeePageUsers.map((ic) => {
                           const icTasks = tasksList.filter((t) => t.assignedToUserId === ic.id);
                           const completed = icTasks.filter((t) => t.status === "Completed").length;
-                          const active = icTasks.filter((t) => t.status === "In Progress" || t.status === "To Do").length;
+                          const active = icTasks.filter((t) => t.status !== "Completed").length;
+                          const replacementUsers = usersList.filter((user) =>
+                            user.isActive && user.id !== ic.id &&
+                            (role === "Admin" || user.teamId === ic.teamId),
+                          );
                           return (
                             <div key={ic.id} className="p-4 rounded-xl border border-slate-200 bg-slate-50/40 hover:bg-slate-50 transition space-y-3">
                               <div className="flex items-center justify-between">
@@ -1867,11 +2081,12 @@ export default function App() {
                                   </div>
                                   <div>
                                     <p className="font-bold text-sm text-slate-900">{ic.name}</p>
-                                    <p className="text-[11px] text-slate-500">{ic.designation}</p>
+                                    <p className="text-[11px] text-slate-500">{ic.designation} · {ic.teamName || "No team"}</p>
+                                    <p className="text-[11px] text-slate-500 truncate">{ic.email}</p>
                                   </div>
                                 </div>
-                                <span className="badge bg-slate-100 text-slate-700">
-                                  Member
+                                <span className={`badge ${ic.isActive ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                                  {ic.isActive ? "Active" : "Inactive"}
                                 </span>
                               </div>
 
@@ -1885,26 +2100,52 @@ export default function App() {
                                   <p className="font-bold text-slate-800 mt-0.5">{completed}</p>
                                 </div>
                               </div>
+                              <p className="text-[11px] text-slate-500">{new Set(icTasks.map((task) => task.projectId)).size} assigned project(s)</p>
 
                               <div className="flex justify-end gap-2 pt-1">
-                                <button
-                                  onClick={() => handleSwitchUser(ic.id)}
-                                  className="w-full text-xs text-emerald-800 bg-emerald-50 hover:bg-emerald-100 font-bold py-1.5 rounded-lg transition"
-                                >
-                                  Switch to {ic.name}
-                                </button>
+                                {ic.isActive && (
+                                  <button
+                                    onClick={() => handleSwitchUser(ic.id)}
+                                    className="w-full text-xs text-emerald-800 bg-emerald-50 hover:bg-emerald-100 font-bold py-1.5 rounded-lg transition"
+                                  >
+                                    Switch to {ic.name}
+                                  </button>
+                                )}
+                                {canManageEmployees && ic.isActive && (
+                                  <button
+                                    onClick={() => {
+                                      setDeactivationTarget(ic);
+                                      setReplacementUserId(replacementUsers[0]?.id || null);
+                                      setDeactivationReason("");
+                                    }}
+                                    className="w-full text-xs text-rose-700 border border-rose-200 hover:bg-rose-50 font-bold py-1.5 rounded-lg transition"
+                                  >
+                                    <X className="w-3.5 h-3.5 inline mr-1" />
+                                    Remove Employee
+                                  </button>
+                                )}
                               </div>
                             </div>
                           );
                         })}
+                        {individualContributors.length === 0 && (
+                          <p className="col-span-full py-8 text-center text-sm text-slate-500">No employees match these filters.</p>
+                        )}
                       </div>
+                      {employeePageCount > 1 && (
+                        <div className="flex items-center justify-end gap-3 text-xs text-slate-600">
+                          <span>Page {employeePage + 1} of {employeePageCount}</span>
+                          <button type="button" disabled={employeePage === 0} onClick={() => setEmployeePage((page) => Math.max(0, page - 1))} className="px-3 py-1.5 border border-slate-200 rounded-lg disabled:opacity-40">Previous</button>
+                          <button type="button" disabled={employeePage + 1 >= employeePageCount} onClick={() => setEmployeePage((page) => Math.min(employeePageCount - 1, page + 1))} className="px-3 py-1.5 border border-slate-200 rounded-lg disabled:opacity-40">Next</button>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
               )}
 
               {/* ----------------- VIEW 6: TEAM WORKLOAD & CAPACITY ----------------- */}
-              {currentView === "workload" && (
+              {currentView === "workload" && role !== "Individual" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div className="flex items-center justify-between">
                     <div>
@@ -2143,7 +2384,7 @@ export default function App() {
               )}
 
               {/* ----------------- VIEW 9: ANALYTICS ----------------- */}
-              {currentView === "analytics" && (
+              {currentView === "analytics" && role !== "Individual" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div>
                     <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
@@ -2207,11 +2448,83 @@ export default function App() {
                       })}
                     </div>
                   </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <section className="bg-white p-6 rounded-xl border border-slate-200">
+                      <h3 className="font-bold text-base text-slate-900 mb-4">Project Progress & Deadlines</h3>
+                      <div className="space-y-4">
+                        {[...projectsList].sort((a, b) => (a.targetDate || "9999-12-31").localeCompare(b.targetDate || "9999-12-31")).map((project) => (
+                          <div key={project.id}>
+                            <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
+                              <span className="font-semibold text-slate-800 truncate">{project.name}</span>
+                              <span className="shrink-0 text-slate-500">{project.targetDate || "No deadline"} · {project.progressPercent || 0}%</span>
+                            </div>
+                            <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                              <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${Math.min(100, project.progressPercent || 0)}%` }} />
+                            </div>
+                          </div>
+                        ))}
+                        {projectsList.length === 0 && <p className="text-sm text-slate-500">No projects are assigned to this account.</p>}
+                      </div>
+                    </section>
+
+                    <section className="bg-white p-6 rounded-xl border border-slate-200">
+                      <h3 className="font-bold text-base text-slate-900 mb-4">Team Workload & Overdue Tasks</h3>
+                      <div className="space-y-4">
+                        {workloadData.map((member) => (
+                          <div key={member.userId}>
+                            <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
+                              <span className="font-semibold text-slate-800 truncate">{member.name} · {member.teamName || "No team"}</span>
+                              <span className="shrink-0 text-slate-500">{member.totalTasks} tasks · {member.overdueTasks} overdue</span>
+                            </div>
+                            <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                              <div className={`h-full rounded-full ${member.overdueTasks > 0 ? "bg-rose-500" : "bg-teal-500"}`} style={{ width: `${Math.max(2, Math.round((member.totalTasks / maxTeamTasks) * 100))}%` }} />
+                            </div>
+                          </div>
+                        ))}
+                        {workloadData.length === 0 && <p className="text-sm text-slate-500">No workload data is available for this account.</p>}
+                      </div>
+                    </section>
+                  </div>
+                </div>
+              )}
+
+              {currentView === "activity" && role !== "Individual" && (
+                <div className="space-y-6 max-w-7xl mx-auto">
+                  <div>
+                    <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">Activity Logs</h1>
+                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5">Recent task, project, and employee events visible to your role</p>
+                  </div>
+                  <div className="bg-white rounded-xl border border-slate-200 overflow-x-auto">
+                    {activityEvents.length === 0 ? (
+                      <p className="p-8 text-sm text-center text-slate-500">No activity is available in your authorized scope.</p>
+                    ) : (
+                      <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[11px]">
+                            <th className="p-3">Time</th><th className="p-3">Actor</th><th className="p-3">Type</th><th className="p-3">Event</th><th className="p-3">Record</th><th className="p-3">Details</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {activityEvents.map((event) => (
+                            <tr key={event.id}>
+                              <td className="p-3 whitespace-nowrap text-slate-500">{new Date(event.createdAt).toLocaleString()}</td>
+                              <td className="p-3 font-semibold text-slate-800">{event.actorName}</td>
+                              <td className="p-3">{event.eventType}</td>
+                              <td className="p-3 font-semibold text-slate-800">{event.action.split("_").join(" ")}</td>
+                              <td className="p-3">{event.entityName}</td>
+                              <td className="p-3 text-slate-600">{event.details}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
                 </div>
               )}
 
               {/* ----------------- VIEW 10: PROJECT ALLOTMENTS ----------------- */}
-              {currentView === "allotments" && (
+              {role === "Admin" && currentView === "allotments" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div className="flex items-center justify-between">
                     <div>
@@ -2283,7 +2596,7 @@ export default function App() {
               )}
 
               {/* ----------------- VIEW 11: SYSTEM WORKFLOWS ----------------- */}
-              {currentView === "workflows" && (
+              {currentView === "workflows" && role !== "Individual" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div>
                     <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
@@ -2347,7 +2660,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               )}
 
               {/* ----------------- VIEW 12: SETTINGS ----------------- */}
-              {currentView === "settings" && (
+              {currentView === "settings" && role === "Admin" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div>
                     <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
@@ -3079,6 +3392,53 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
+                  <label className="block font-bold text-slate-700 mb-1">Department *</label>
+                  <input
+                    type="text"
+                    required
+                    value={userFormData.department}
+                    onChange={(e) => setUserFormData({ ...userFormData, department: e.target.value })}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Team *</label>
+                  {role === "Admin" ? (
+                    <select
+                      required
+                      value={userFormData.teamId}
+                      onChange={(e) => setUserFormData({ ...userFormData, teamId: Number(e.target.value) })}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white"
+                    >
+                      <option value={0} disabled>Select team</option>
+                      {teamsList.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      readOnly
+                      value={teamsList.find((team) => team.id === currentUser?.teamId)?.name || "Team not assigned"}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-slate-50"
+                    />
+                  )}
+                </div>
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Authorized Projects</label>
+                <select
+                  multiple
+                  value={userFormData.projectIds.map(String)}
+                  onChange={(e) => setUserFormData({
+                    ...userFormData,
+                    projectIds: Array.from(e.target.selectedOptions, (option) => Number(option.value)),
+                  })}
+                  className="w-full min-h-24 px-3 py-2 border border-slate-200 rounded-lg bg-white"
+                >
+                  {projectsList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
                   <label className="block font-bold text-slate-700 mb-1">Role *</label>
                   {role === "Admin" ? (
                     <select
@@ -3124,6 +3484,63 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               </div>
             </form>
           </div>
+        </div>
+      )}
+
+      {deactivationTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <form onSubmit={handleDeactivateEmployee} className="bg-white rounded-xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div>
+              <h3 className="text-base font-bold text-rose-700">Remove Employee</h3>
+              <p className="text-sm text-slate-700 mt-2">
+                Deactivate <strong>{deactivationTarget.name}</strong>? Their account and active team/project memberships will be disabled. Completed tasks and history will be retained.
+              </p>
+            </div>
+            {deactivationActiveTaskCount > 0 && (
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Reassign {deactivationActiveTaskCount} active task(s) to *
+                </label>
+                <select
+                  required
+                  value={replacementUserId || ""}
+                  onChange={(e) => setReplacementUserId(e.target.value ? Number(e.target.value) : null)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white"
+                >
+                  <option value="">Select an active teammate</option>
+                  {deactivationReplacementUsers.map((user) => (
+                    <option key={user.id} value={user.id}>{user.name} · {user.role}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div>
+              <label className="block font-bold text-slate-700 mb-1">Reason (optional)</label>
+              <textarea
+                rows={2}
+                maxLength={500}
+                value={deactivationReason}
+                onChange={(e) => setDeactivationReason(e.target.value)}
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeactivationTarget(null)}
+                className="px-3 py-2 border border-slate-200 rounded-lg font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={deactivationActiveTaskCount > 0 && (replacementUserId === null || deactivationReplacementUsers.length === 0)}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold rounded-lg"
+              >
+                Confirm Deactivation
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

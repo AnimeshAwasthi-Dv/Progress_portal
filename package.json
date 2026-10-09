@@ -7,6 +7,7 @@
     "dev": "concurrently -k -n api,web \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
+    "test:authorization": "tsx --test server/authorization.test.ts",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "start:server": "node server-dist/server/index.js",
     "preview": "vite preview"
