@@ -6,3 +6,6 @@ server-dist/
 .env
 .env.*
 !.env.example
+
+../.env
+/Progress_portal-main/
