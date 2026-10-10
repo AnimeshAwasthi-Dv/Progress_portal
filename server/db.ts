@@ -372,8 +372,7 @@ export async function initializeDatabase() {
       "vaibhav@taskmanager.internal",
       "sakshi@taskmanager.internal",
       "suraj@taskmanager.internal",
-      "rohit@taskmanager.internal",
-      "neha@taskmanager.internal",
+      
     ];
     for (const email of seededEmails) {
       await client.query(
@@ -621,15 +620,13 @@ export async function initializeDatabase() {
       const aiTeamId = teamRes.rows[1].id;
       const appTeamId = teamRes.rows[2].id;
 
-      // Create users: Admin (unnamed role), Technical Lead (Animesh), Technical Interns (Vaibhav, Sakshi, Suraj), Sales Team (Rohit, Neha)
+      // Seed the Admin and Technical users. Sales members are added manually by an Admin.
       const seedUsers = [
         { name: "Admin", email: "admin@taskmanager.internal", role: "Admin", dept: "Executive", desig: "System Administrator", teamId: coreTeamId },
         { name: "Animesh", email: "animesh@taskmanager.internal", role: "Team Lead", dept: "Technical", desig: "Technical Lead", teamId: coreTeamId },
         { name: "Vaibhav", email: "vaibhav@taskmanager.internal", role: "Individual", dept: "Technical", desig: "Technical Intern", teamId: aiTeamId },
         { name: "Sakshi", email: "sakshi@taskmanager.internal", role: "Individual", dept: "Technical", desig: "Technical Intern", teamId: aiTeamId },
         { name: "Suraj", email: "suraj@taskmanager.internal", role: "Individual", dept: "Technical", desig: "Technical Intern", teamId: aiTeamId },
-        { name: "Rohit", email: "rohit@taskmanager.internal", role: "Team Lead", dept: "Sales", desig: "Sales Lead", teamId: appTeamId },
-        { name: "Neha", email: "neha@taskmanager.internal", role: "Individual", dept: "Sales", desig: "Sales Executive", teamId: appTeamId },
       ];
 
       const insertedUsers: Record<string, number> = {};

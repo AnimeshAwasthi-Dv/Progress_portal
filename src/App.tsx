@@ -193,6 +193,7 @@ export default function App() {
   const [employeeTeamFilter, setEmployeeTeamFilter] = useState("All");
   const [employeeStatusFilter, setEmployeeStatusFilter] = useState("All");
   const [employeePage, setEmployeePage] = useState(0);
+  const [selectedDepartment, setSelectedDepartment] = useState<string | null>(null);
   const [reportDate, setReportDate] = useState<string>(localDateString());
 
   // Task Detail Modal / Side Panel
@@ -759,6 +760,21 @@ export default function App() {
   const adminUsers = useMemo(() => {
     return usersList.filter((u) => u.role === "Admin");
   }, [usersList]);
+  const departmentGroups = useMemo(() => {
+    const groups = new Map<string, AppUser[]>();
+    usersList.forEach((user) => {
+      const name = user.department?.trim() || "Unassigned";
+      const key = name.toLocaleLowerCase();
+      const existing = groups.get(key);
+      if (existing) existing.push(user);
+      else groups.set(key, [user]);
+    });
+    return Array.from(groups.values()).map((members) => ({
+      name: members[0].department?.trim() || "Unassigned",
+      members,
+    })).sort((left, right) => left.name.localeCompare(right.name));
+  }, [usersList]);
+  const activeDepartment = departmentGroups.find((department) => department.name === selectedDepartment) || null;
   const employeePageSize = 9;
   const employeePageCount = Math.max(1, Math.ceil(individualContributors.length / employeePageSize));
   const employeePageUsers = individualContributors.slice(employeePage * employeePageSize, (employeePage + 1) * employeePageSize);
@@ -788,45 +804,127 @@ export default function App() {
 
   if (!isLoading && !currentUser) {
     return (
-      <main className="min-h-screen bg-slate-50 font-sans grid lg:grid-cols-[minmax(0,1fr)_minmax(380px,520px)]">
-        <section className="hidden lg:flex flex-col justify-between bg-emerald-950 p-12 text-white">
-          <div className="flex items-center gap-4">
-            <img src={companyLogo} alt="Dectrocel logo" className="h-16 w-16 rounded-lg bg-white object-contain p-1" />
-            <div>
-              <p className="text-lg font-extrabold">Dectrocel</p>
-              <p className="text-xs font-bold uppercase text-emerald-300">Healthcare and Research</p>
-            </div>
-          </div>
-          <div className="max-w-lg">
-            <p className="text-xs font-bold uppercase text-emerald-300">Task Manager Portal</p>
-            <h1 className="mt-3 text-4xl font-black leading-tight">One workspace for the teams moving care forward.</h1>
-            <p className="mt-4 text-sm leading-relaxed text-emerald-100">Sign in with the username or email provided by your administrator.</p>
-          </div>
-          <p className="text-xs text-emerald-300">Dectrocel Healthcare and Research</p>
+      <main className="min-h-screen font-sans grid lg:grid-cols-[minmax(0,1fr)_minmax(400px,520px)]">
+        {/* Left panel — purple/indigo gradient */}
+        <section className="hidden lg:flex flex-col justify-between p-12 text-white relative overflow-hidden"
+          style={{ background: "linear-gradient(135deg, #312e81 0%, #4338ca 40%, #6366f1 70%, #818cf8 100%)" }}>
+          {/* decorative blobs */}
+          <div className="absolute -top-20 -right-20 w-72 h-72 rounded-full opacity-20" style={{ background: "radial-gradient(circle, #a5b4fc, transparent)" }} />
+          <div className="absolute bottom-10 -left-16 w-56 h-56 rounded-full opacity-15" style={{ background: "radial-gradient(circle, #c7d2fe, transparent)" }} />
+
+         
+<div className="relative flex items-center gap-6">
+  <img
+    src={companyLogo}
+    alt="Dectrocel logo"
+    className="h-24 w-24 shrink-0 rounded-2xl bg-white p-2 object-contain shadow-xl"
+  />
+  <div>
+    <p className="text-4xl font-extrabold tracking-tight">
+      Dectrocel
+    </p>
+    <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-200">
+      Healthcare and Research
+    </p>
+  </div>
+</div>
+
+
+         
+<div className="relative max-w-2xl">
+  <span className="mb-4 inline-block text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">
+    Task Manager Portal
+  </span>
+
+  <h1 className="text-5xl font-black leading-tight tracking-tight xl:text-6xl">
+    One workspace for the teams moving care forward.
+  </h1>
+
+  <p className="mt-5 max-w-xl text-lg leading-relaxed text-indigo-100">
+    Sign in with the username or email provided by your administrator.
+  </p>
+
+  <div className="mt-8 flex flex-wrap gap-6 text-sm font-semibold text-indigo-200">
+    <span>🔒 Secure sessions</span>
+    <span>🏥 Healthcare grade</span>
+    <span>⚡ Real-time sync</span>
+  </div>
+</div>
+
+
+          <p className="relative text-xs text-indigo-300">© {new Date().getFullYear()} Dectrocel Healthcare and Research</p>
         </section>
-        <section className="flex min-h-screen items-center justify-center p-6 sm:p-10">
+
+        {/* Right panel — form */}
+        <section className="flex min-h-screen items-center justify-center bg-slate-50 p-6 sm:p-10">
           <div className="w-full max-w-sm">
+            {/* Mobile logo */}
             <div className="mb-8 flex items-center gap-3 lg:hidden">
-              <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 object-contain" />
-              <div><p className="font-extrabold text-slate-900">Dectrocel</p><p className="text-[10px] font-bold uppercase text-emerald-700">Healthcare and Research</p></div>
+              <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 rounded-xl object-contain shadow" />
+              <div>
+                <p className="font-extrabold text-slate-900">Dectrocel</p>
+                <p className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest">Healthcare and Research</p>
+              </div>
             </div>
-            <p className="text-xs font-bold uppercase text-emerald-700">Secure sign in</p>
-            <h1 className="mt-2 text-2xl font-black text-slate-900">Welcome back</h1>
+
+            <span className="inline-block text-xs font-bold uppercase tracking-widest text-indigo-600 mb-2">Secure sign in</span>
+            <h1 className="text-2xl font-black text-slate-900">Welcome back</h1>
             <p className="mt-2 text-sm text-slate-500">Use your assigned username or work email.</p>
-            {errorMessage && <p role="alert" className="mt-5 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{errorMessage}</p>}
+
+            {errorMessage && (
+              <p role="alert" className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                {errorMessage}
+              </p>
+            )}
+
             <form onSubmit={handleLoginSubmit} className="mt-6 space-y-4">
               <div>
-                <label htmlFor="login-identifier" className="mb-1 block text-sm font-semibold text-slate-700">Username or email</label>
-                <input id="login-identifier" autoComplete="username" required value={loginIdentifier} onChange={(event) => setLoginIdentifier(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100" />
+                <label htmlFor="login-identifier" className="mb-1.5 block text-sm font-semibold text-slate-700">
+                  Username or email
+                </label>
+                <input
+                  id="login-identifier"
+                  autoComplete="username"
+                  required
+                  value={loginIdentifier}
+                  onChange={(e) => setLoginIdentifier(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                  placeholder="e.g. animesh3"
+                />
               </div>
               <div>
-                <label htmlFor="login-password" className="mb-1 block text-sm font-semibold text-slate-700">Password</label>
+                <label htmlFor="login-password" className="mb-1.5 block text-sm font-semibold text-slate-700">
+                  Password
+                </label>
                 <div className="relative">
-                  <input id="login-password" type={showLoginPassword ? "text" : "password"} autoComplete="current-password" required value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 pr-11 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100" />
-                  <button type="button" aria-label={showLoginPassword ? "Hide password" : "Show password"} onClick={() => setShowLoginPassword((visible) => !visible)} className="absolute inset-y-0 right-0 px-3 text-slate-500"><Eye className="h-4 w-4" /></button>
+                  <input
+                    id="login-password"
+                    type={showLoginPassword ? "text" : "password"}
+                    autoComplete="current-password"
+                    required
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 pr-11 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                    placeholder="••••••••••••"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showLoginPassword ? "Hide password" : "Show password"}
+                    onClick={() => setShowLoginPassword((v) => !v)}
+                    className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700"
+                  >
+                    <Eye className="h-4 w-4" />
+                  </button>
                 </div>
               </div>
-              <button type="submit" disabled={isLoading} className="w-full rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60">{isLoading ? "Signing in..." : "Sign in"}</button>
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full rounded-xl py-2.5 text-sm font-bold text-white transition disabled:opacity-60"
+                style={{ background: "linear-gradient(135deg, #4338ca, #6366f1)" }}
+              >
+                {isLoading ? "Signing in…" : "Sign in"}
+              </button>
             </form>
           </div>
         </section>
@@ -837,18 +935,41 @@ export default function App() {
   if (!isLoading && currentUser?.mustChangePassword) {
     return (
       <main className="min-h-screen bg-slate-50 font-sans flex items-center justify-center p-6">
-        <section className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-7 shadow-sm">
-          <div className="mb-5 flex items-center gap-3"><img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 object-contain" /><div><p className="font-extrabold text-slate-900">Dectrocel</p><p className="text-[10px] font-bold uppercase text-emerald-700">Healthcare and Research</p></div></div>
+        <section className="w-full max-w-md rounded-2xl border border-indigo-100 bg-white p-8 shadow-lg">
+          <div className="mb-6 flex items-center gap-3">
+            <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 rounded-xl object-contain shadow" />
+            <div>
+              <p className="font-extrabold text-slate-900">Dectrocel</p>
+              <p className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest">Healthcare and Research</p>
+            </div>
+          </div>
           <h1 className="text-xl font-black text-slate-900">Set a new password</h1>
           <p className="mt-2 text-sm text-slate-500">Your temporary password must be replaced before opening your dashboard.</p>
-          {errorMessage && <p role="alert" className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{errorMessage}</p>}
-          {successMessage && <p role="status" className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{successMessage}</p>}
-          <form onSubmit={handlePasswordChangeSubmit} className="mt-5 space-y-4">
-            <div><label htmlFor="current-password" className="mb-1 block text-sm font-semibold text-slate-700">Temporary password</label><input id="current-password" type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" /></div>
-            <div><label htmlFor="new-password" className="mb-1 block text-sm font-semibold text-slate-700">New password</label><div className="relative"><input id="new-password" type={showNewPassword ? "text" : "password"} minLength={12} maxLength={128} autoComplete="new-password" required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2.5 pr-11 text-sm" /><button type="button" aria-label={showNewPassword ? "Hide new password" : "Show new password"} onClick={() => setShowNewPassword((visible) => !visible)} className="absolute inset-y-0 right-0 px-3 text-slate-500"><Eye className="h-4 w-4" /></button></div><p className="mt-1 text-xs text-slate-500">Use 12-128 characters with at least one letter and one number.</p></div>
-            <div><label htmlFor="confirm-password" className="mb-1 block text-sm font-semibold text-slate-700">Confirm new password</label><input id="confirm-password" type="password" autoComplete="new-password" required value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" /></div>
-            <button type="submit" disabled={isLoading} className="w-full rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60">Update password</button>
-            <button type="button" onClick={handleLogout} className="w-full py-2 text-sm font-semibold text-slate-600 hover:text-slate-900">Sign out</button>
+          {errorMessage && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{errorMessage}</p>}
+          {successMessage && <p role="status" className="mt-4 rounded-xl border border-indigo-200 bg-indigo-50 p-3 text-sm text-indigo-800">{successMessage}</p>}
+          <form onSubmit={handlePasswordChangeSubmit} className="mt-6 space-y-4">
+            <div>
+              <label htmlFor="current-password" className="mb-1.5 block text-sm font-semibold text-slate-700">Temporary password</label>
+              <input id="current-password" type="password" autoComplete="current-password" required value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+            </div>
+            <div>
+              <label htmlFor="new-password" className="mb-1.5 block text-sm font-semibold text-slate-700">New password</label>
+              <div className="relative">
+                <input id="new-password" type={showNewPassword ? "text" : "password"} minLength={12} maxLength={128} autoComplete="new-password" required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 pr-11 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+                <button type="button" aria-label={showNewPassword ? "Hide" : "Show"} onClick={() => setShowNewPassword((v) => !v)} className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700"><Eye className="h-4 w-4" /></button>
+              </div>
+              <p className="mt-1 text-xs text-slate-500">12–128 characters with at least one letter and one number.</p>
+            </div>
+            <div>
+              <label htmlFor="confirm-password" className="mb-1.5 block text-sm font-semibold text-slate-700">Confirm new password</label>
+              <input id="confirm-password" type="password" autoComplete="new-password" required value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+            </div>
+            <button type="submit" disabled={isLoading} className="w-full rounded-xl py-2.5 text-sm font-bold text-white transition disabled:opacity-60" style={{ background: "linear-gradient(135deg, #4338ca, #6366f1)" }}>
+              Update password
+            </button>
+            <button type="button" onClick={handleLogout} className="w-full py-2 text-sm font-semibold text-slate-500 hover:text-slate-800 transition">
+              Sign out
+            </button>
           </form>
         </section>
       </main>
@@ -858,11 +979,11 @@ export default function App() {
   return (
     <div className="h-screen overflow-hidden bg-slate-50 text-slate-900 font-sans flex flex-col">
       {/* Top Navigation Bar in Green & White Theme */}
-      <header className="sticky top-0 z-30 bg-white border-b border-emerald-100 px-4 lg:px-8 py-3 flex items-center justify-between shadow-xs lg:ml-64">
+      <header className="sticky top-0 z-30 bg-white border-b border-indigo-100 px-4 lg:px-8 py-3 flex items-center justify-between shadow-sm lg:ml-64">
         <div className="flex items-center gap-4">
           <button
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
-            className="p-2 text-slate-600 hover:bg-emerald-50 rounded-lg lg:hidden"
+            className="p-2 text-slate-600 hover:bg-indigo-50 rounded-lg lg:hidden"
             aria-label="Toggle Navigation"
           >
             <Menu className="w-5 h-5" />
@@ -870,22 +991,28 @@ export default function App() {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Active User Name / Persona Selector */}
-          <div className="flex items-center bg-emerald-50/70 border border-emerald-200 rounded-lg px-3 py-1.5 text-xs">
-            <span className="text-emerald-900 font-bold">{currentUser?.name} · {currentUser?.role}</span>
-            <button onClick={handleLogout} className="ml-3 text-rose-700 font-bold hover:underline">Sign out</button>
+          {/* Active User chip */}
+          <div className="flex items-center bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-1.5 text-xs gap-2">
+            <div className="w-6 h-6 rounded-full bg-indigo-200 text-indigo-800 font-bold flex items-center justify-center text-[10px]">
+              {initials(currentUser?.name)}
+            </div>
+            <span className="text-indigo-900 font-bold">{currentUser?.name} – {currentUser?.role}</span>
+            <button onClick={handleLogout} className="ml-1 flex items-center gap-1 text-rose-600 font-bold hover:text-rose-800 transition">
+              <Shield className="w-3 h-3" />
+              Sign out
+            </button>
           </div>
 
-          {/* Notifications Trigger */}
+          {/* Notifications */}
           <div className="relative">
             <button
               onClick={() => setNotificationsOpen(!notificationsOpen)}
-              className="relative p-2 text-slate-600 hover:bg-emerald-50 rounded-lg transition"
+              className="relative p-2 text-slate-600 hover:bg-indigo-50 rounded-lg transition"
               aria-label="Notifications"
             >
               <Radio className="w-5 h-5" />
               {notifications.some((n) => !n.isRead) && (
-                <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 bg-emerald-500 rounded-full ring-2 ring-white" />
+                <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 bg-indigo-500 rounded-full ring-2 ring-white" />
               )}
             </button>
 
@@ -894,7 +1021,7 @@ export default function App() {
                 <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-sm text-slate-900">Notifications & Alerts</span>
-                    <span className="text-xs bg-emerald-50 text-emerald-700 px-2 py-0.5 rounded-full font-semibold">
+                    <span className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full font-semibold">
                       {notifications.filter((n) => !n.isRead).length} new
                     </span>
                   </div>
@@ -903,7 +1030,7 @@ export default function App() {
                       await markAllNotificationsRead();
                       setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
                     }}
-                    className="text-xs text-emerald-600 hover:underline font-medium"
+                    className="text-xs text-indigo-600 hover:underline font-medium"
                   >
                     Mark all read
                   </button>
@@ -926,7 +1053,7 @@ export default function App() {
                           setNotificationsOpen(false);
                         }}
                         className={`py-3 px-2 text-xs cursor-pointer rounded-lg transition ${
-                          n.isRead ? "hover:bg-slate-50 text-slate-600" : "bg-emerald-50/50 hover:bg-emerald-50 text-slate-900 font-medium"
+                          n.isRead ? "hover:bg-slate-50 text-slate-600" : "bg-indigo-50/50 hover:bg-indigo-50 text-slate-900 font-medium"
                         }`}
                       >
                         <div className="flex items-center justify-between mb-1">
@@ -948,7 +1075,7 @@ export default function App() {
           {canAssignTasks && (
             <button
               onClick={handleOpenCreateTask}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs sm:text-sm px-3.5 py-2 rounded-lg flex items-center gap-1.5 shadow-sm shadow-emerald-500/20 transition"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs sm:text-sm px-3.5 py-2 rounded-lg flex items-center gap-1.5 shadow-sm shadow-indigo-500/20 transition"
             >
               <Plus className="w-4 h-4" />
               <span>Create Task</span>
@@ -991,16 +1118,16 @@ export default function App() {
           }`}
         >
           <div className="min-h-[72px] shrink-0 border-b border-slate-100 px-3 py-2 flex items-center gap-2.5">
-            <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 shrink-0 object-contain" />
+            <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 shrink-0 object-contain rounded-lg" />
             <div className="min-w-0 leading-tight">
               <p className="text-sm font-extrabold text-slate-900">Dectrocel</p>
-              <p className="text-[10px] font-bold uppercase text-emerald-700">Healthcare and Research</p>
+              <p className="text-[10px] font-bold uppercase text-indigo-600">Healthcare and Research</p>
             </div>
           </div>
 
           {/* User Profile Card */}
-          <div className="p-4 border-b border-emerald-50 bg-emerald-50/30 flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-emerald-100 text-emerald-800 font-bold flex items-center justify-center text-sm ring-2 ring-emerald-200">
+          <div className="p-4 border-b border-indigo-50 bg-indigo-50/40 flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-800 font-bold flex items-center justify-center text-sm ring-2 ring-indigo-200">
               {initials(currentUser?.name)}
             </div>
             <div className="min-w-0 flex-1">
@@ -1008,7 +1135,7 @@ export default function App() {
                 {currentUser?.name === "Admin" ? "Administrator" : currentUser?.name}
               </p>
               <div className="flex items-center gap-1.5 mt-0.5">
-                <span className={`badge ${roleBadgeStyles[role].bg} px-2 py-0.2 border text-[11px]`}>
+                <span className="badge bg-indigo-50 text-indigo-700 border border-indigo-200 text-[11px]">
                   {currentUser?.role === "Admin" ? "Admin" : currentUser?.role}
                 </span>
               </div>
@@ -1026,11 +1153,11 @@ export default function App() {
               }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
                 currentView === "overview"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
-              <LayoutDashboard className="w-4 h-4 text-emerald-600" />
+              <LayoutDashboard className="w-4 h-4 text-indigo-500" />
               <span>Dashboard</span>
             </button>
 
@@ -1041,16 +1168,16 @@ export default function App() {
               }}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition ${
                 currentView === "my-tasks"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
               <div className="flex items-center gap-3">
-                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                <CheckCircle2 className="w-4 h-4 text-indigo-500" />
                 <span>My Tasks</span>
               </div>
               {metrics?.personal?.myTotalTasks !== undefined && (
-                <span className="bg-emerald-100 text-emerald-800 text-xs px-2 py-0.5 rounded-full font-semibold">
+                <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-0.5 rounded-full font-semibold">
                   {metrics.personal.myTotalTasks}
                 </span>
               )}
@@ -1069,7 +1196,7 @@ export default function App() {
                 }`}
               >
                 <div className="flex items-center gap-3">
-                  <ListTodo className="w-4 h-4 text-emerald-600" />
+                  <ListTodo className="w-4 h-4 text-indigo-500" />
                   <span>All Tasks</span>
                 </div>
                 <span className="bg-slate-100 text-slate-700 text-xs px-2 py-0.5 rounded-full font-semibold">
@@ -1095,7 +1222,7 @@ export default function App() {
                     : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
                 }`}
               >
-                <Activity className="w-4 h-4 text-emerald-600" />
+                <Activity className="w-4 h-4 text-indigo-500" />
                 <span>Activity Logs</span>
               </button>
             )}
@@ -1107,12 +1234,12 @@ export default function App() {
               }}
               className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg transition ${
                 currentView === "projects"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
               <div className="flex items-center gap-3">
-                <FolderGit2 className="w-4 h-4 text-emerald-600" />
+                <FolderGit2 className="w-4 h-4 text-indigo-500" />
                 <span>Projects</span>
               </div>
               <span className="bg-slate-100 text-slate-700 text-xs px-2 py-0.5 rounded-full font-semibold">
@@ -1132,16 +1259,16 @@ export default function App() {
                     : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
                 }`}
               >
-                <Users className="w-4 h-4 text-emerald-600" />
+                <Users className="w-4 h-4 text-indigo-500" />
                 <span>Employees & Teams</span>
               </button>
             )}
             {canManageUsers && (
               <button
                 onClick={openCreateProfile}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-emerald-800 hover:bg-emerald-50 transition font-bold"
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-indigo-700 hover:bg-indigo-50 transition font-bold"
               >
-                <UserPlus className="w-4 h-4 text-emerald-600" />
+                <UserPlus className="w-4 h-4 text-indigo-500" />
                 <span>Create Profile</span>
               </button>
             )}
@@ -1154,11 +1281,11 @@ export default function App() {
               }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
                 currentView === "workload"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
-              <BarChart3 className="w-4 h-4 text-emerald-600" />
+              <BarChart3 className="w-4 h-4 text-indigo-500" />
               <span>Team Workload</span>
             </button>
             )}
@@ -1170,11 +1297,11 @@ export default function App() {
               }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
                 currentView === "daily-reports"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
-              <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+              <FileSpreadsheet className="w-4 h-4 text-indigo-500" />
               <span>Daily Reports</span>
             </button>
 
@@ -1189,11 +1316,11 @@ export default function App() {
               }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
                 currentView === "calendar"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
-              <CalendarIcon className="w-4 h-4 text-emerald-600" />
+              <CalendarIcon className="w-4 h-4 text-indigo-500" />
               <span>Calendar</span>
             </button>
 
@@ -1205,11 +1332,11 @@ export default function App() {
               }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
                 currentView === "analytics"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
-              <TrendingUp className="w-4 h-4 text-emerald-600" />
+              <TrendingUp className="w-4 h-4 text-indigo-500" />
               <span>Analytics</span>
             </button>
             )}
@@ -1226,7 +1353,7 @@ export default function App() {
                     : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
                 }`}
               >
-                <Network className="w-4 h-4 text-emerald-600" />
+                <Network className="w-4 h-4 text-indigo-500" />
                 <span>Project Allotments</span>
               </button>
             )}
@@ -1239,11 +1366,11 @@ export default function App() {
               }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
                 currentView === "workflows"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
-              <Workflow className="w-4 h-4 text-emerald-600" />
+              <Workflow className="w-4 h-4 text-indigo-500" />
               <span>Workflows & Roles</span>
             </button>
             )}
@@ -1256,20 +1383,20 @@ export default function App() {
               }}
               className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
                 currentView === "settings"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
+                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
+                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
               }`}
             >
-              <Settings className="w-4 h-4 text-emerald-600" />
+              <Settings className="w-4 h-4 text-indigo-500" />
               <span>Settings</span>
             </button>
             )}
           </nav>
 
           <div className="p-3 border-t border-slate-100 text-xs text-slate-500">
-            <div className="bg-emerald-50/60 p-2.5 rounded-lg border border-emerald-200/70">
-              <p className="font-bold text-emerald-900">Dectrocel Healthcare and Research</p>
-              <p className="text-[11px] text-emerald-700 mt-0.5">
+            <div className="bg-indigo-50/60 p-2.5 rounded-lg border border-indigo-200/70">
+              <p className="font-bold text-indigo-900">Dectrocel Healthcare and Research</p>
+              <p className="text-[11px] text-indigo-600 mt-0.5">
                 Authenticated role: <strong>{currentUser?.role === "Admin" ? "Admin" : currentUser?.role}</strong>
               </p>
             </div>
@@ -1477,7 +1604,7 @@ export default function App() {
                       <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs">
                         <div className="flex items-center justify-between mb-4">
                           <h2 className="font-bold text-base text-slate-900 flex items-center gap-2">
-                            <FolderGit2 className="w-4 h-4 text-emerald-600" />
+                            <FolderGit2 className="w-4 h-4 text-indigo-500" />
                             Active Projects
                           </h2>
                           <button
@@ -1524,7 +1651,7 @@ export default function App() {
                       {/* Daily Report Quick Submission */}
                       <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-200 rounded-xl p-5 shadow-xs">
                         <div className="flex items-center gap-2 mb-2 text-emerald-950 font-bold text-sm">
-                          <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                          <FileSpreadsheet className="w-4 h-4 text-indigo-500" />
                           Daily Progress Reporting
                         </div>
                         <p className="text-xs text-emerald-800 mb-4">
@@ -1551,7 +1678,7 @@ export default function App() {
                       {/* Live Activity Audit Feed */}
                       <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs">
                         <h2 className="font-bold text-base text-slate-900 mb-4 flex items-center gap-2">
-                          <Activity className="w-4 h-4 text-emerald-600" />
+                          <Activity className="w-4 h-4 text-indigo-500" />
                           Recent Activity
                         </h2>
 
@@ -1892,6 +2019,80 @@ export default function App() {
                       </button>
                     )}
                   </div>
+
+                  {role === "Admin" && (
+                    <section className="space-y-4" aria-label="Departments">
+                      <div>
+                        <h2 className="text-lg font-extrabold text-slate-900">Departments</h2>
+                        <p className="text-xs sm:text-sm text-slate-500">Choose a department to see its employees and team details.</p>
+                      </div>
+                      {departmentGroups.length === 0 ? (
+                        <div className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">No departments have employee profiles yet.</div>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                          {departmentGroups.map((department) => {
+                            const activeMembers = department.members.filter((member) => member.isActive).length;
+                            const isSelected = selectedDepartment === department.name;
+                            return (
+                              <button
+                                key={department.name}
+                                type="button"
+                                aria-pressed={isSelected}
+                                onClick={() => setSelectedDepartment(isSelected ? null : department.name)}
+                                className={`rounded-xl border p-4 text-left transition ${isSelected ? "border-emerald-400 bg-emerald-50 ring-2 ring-emerald-100" : "border-slate-200 bg-white hover:border-emerald-300 hover:bg-emerald-50/40"}`}
+                              >
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="flex items-center gap-3">
+                                    <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-100 text-emerald-800"><Briefcase className="h-5 w-5" /></span>
+                                    <span>
+                                      <span className="block font-bold text-slate-900">{department.name}</span>
+                                      <span className="mt-0.5 block text-xs text-slate-500">{department.members.length} {department.members.length === 1 ? "member" : "members"}</span>
+                                    </span>
+                                  </div>
+                                  <ArrowRight className={`mt-1 h-4 w-4 transition ${isSelected ? "rotate-90 text-emerald-700" : "text-slate-400"}`} />
+                                </div>
+                                <p className="mt-3 text-xs text-slate-500">{activeMembers} active · {department.members.length - activeMembers} inactive</p>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {activeDepartment && (
+                        <div className="overflow-hidden rounded-2xl border border-emerald-200 bg-white shadow-sm">
+                          <div className="flex flex-col gap-2 border-b border-slate-100 bg-emerald-50/50 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                            <div>
+                              <h3 className="font-extrabold text-slate-900">{activeDepartment.name} Department</h3>
+                              <p className="text-xs text-slate-500">Department members, roles, teams, and assigned work</p>
+                            </div>
+                            <span className="text-xs font-semibold text-emerald-800">{activeDepartment.members.length} members</span>
+                          </div>
+                          <div className="divide-y divide-slate-100">
+                            {activeDepartment.members.map((member) => {
+                              const memberTasks = tasksList.filter((task) => task.assignedToUserId === member.id);
+                              const openTasks = memberTasks.filter((task) => task.status !== "Completed").length;
+                              return (
+                                <div key={member.id} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                                  <div className="flex items-center gap-3">
+                                    <span className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-sm font-bold text-slate-700">{initials(member.name)}</span>
+                                    <div>
+                                      <p className="font-bold text-sm text-slate-900">{member.name}</p>
+                                      <p className="text-xs text-slate-500">{member.designation} · {member.email}</p>
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                                    <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">{member.role}</span>
+                                    <span className="rounded-full bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700">{member.teamName || "No team"}</span>
+                                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${member.isActive ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{member.isActive ? "Active" : "Inactive"}</span>
+                                    <span className="text-xs text-slate-500">{openTasks} open / {memberTasks.length} tasks</span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                  )}
 
                   {/* Role filter */}
                   <div className="bg-white p-3 rounded-xl border border-slate-200 flex items-center gap-3">
@@ -2622,7 +2823,7 @@ export default function App() {
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-xs space-y-3">
                       <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
-                        <Workflow className="w-4 h-4 text-emerald-600" />
+                        <Workflow className="w-4 h-4 text-indigo-500" />
                         1. Task Lifecycle & Approval Workflow
                       </h3>
                       <div className="bg-slate-900 text-emerald-400 p-4 rounded-xl font-mono text-xs overflow-x-auto">

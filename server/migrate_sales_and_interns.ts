@@ -7,42 +7,14 @@ async function updateSalesAndRoles() {
 
     // 1. Create Sales Team if not exists
     const salesTeamRes = await client.query("SELECT id FROM teams WHERE name ILIKE 'Sales Team' OR name ILIKE 'Sales & Business Development'");
-    let salesTeamId: number;
     if (salesTeamRes.rows.length === 0) {
-      const inserted = await client.query(`
+      await client.query(`
         INSERT INTO teams (name, description)
         VALUES ('Sales Team', 'Client outreach, demo pipelines, commercial allotments, and revenue operations')
-        RETURNING id
       `);
-      salesTeamId = inserted.rows[0].id;
-    } else {
-      salesTeamId = salesTeamRes.rows[0].id;
     }
 
-    // 2. Add sample Sales users if none exist
-    const salesUsersCheck = await client.query("SELECT id FROM users WHERE department = 'Sales'");
-    if (salesUsersCheck.rows.length === 0) {
-      const salesRoster = [
-        { name: "Rohit", email: "rohit@taskmanager.internal", role: "Team Lead", dept: "Sales", desig: "Sales Lead" },
-        { name: "Neha", email: "neha@taskmanager.internal", role: "Individual", dept: "Sales", desig: "Sales Executive" },
-        { name: "Aman", email: "aman@taskmanager.internal", role: "Individual", dept: "Sales", desig: "Business Development Associate" },
-      ];
-
-      for (const su of salesRoster) {
-        const uRes = await client.query<{ id: number }>(`
-          INSERT INTO users (name, email, password_hash, role, department, designation, team_id)
-          VALUES ($1, $2, 'password123', $3, $4, $5, $6)
-          RETURNING id
-        `, [su.name, su.email, su.role, su.dept, su.desig, salesTeamId]);
-
-        await client.query(`INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [salesTeamId, uRes.rows[0].id]);
-        await client.query(`
-          INSERT INTO employees (name, department, designation, current_work, status)
-          VALUES ($1, $2, $3, 'Client outreach & enterprise lead pipeline', 'In Progress')
-          ON CONFLICT DO NOTHING
-        `, [su.name, su.dept, su.desig]);
-      }
-    }
+    // Sales accounts are added manually by an Admin; do not seed sample users here.
 
     // 3. Create Sales Project if not exists
     const salesProjCheck = await client.query("SELECT id FROM projects WHERE code = 'SLS'");
