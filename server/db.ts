@@ -365,20 +365,21 @@ export async function initializeDatabase() {
       );
     }
 
-    // Reset all seeded users to the new default password and clear the force-change flag
-    const seededEmails = [
-      "admin@taskmanager.internal",
-      "animesh@taskmanager.internal",
-      "vaibhav@taskmanager.internal",
-      "sakshi@taskmanager.internal",
-      "suraj@taskmanager.internal",
-      
-    ];
-    for (const email of seededEmails) {
-      await client.query(
-        "UPDATE users SET password_hash = $1, password_reset_required = false WHERE lower(email) = lower($2)",
-        [hashPassword("@12345"), email],
-      );
+    // Keep development fixtures convenient, but never reset production credentials.
+    if (process.env.NODE_ENV !== "production") {
+      const seededEmails = [
+        "admin@taskmanager.internal",
+        "animesh@taskmanager.internal",
+        "vaibhav@taskmanager.internal",
+        "sakshi@taskmanager.internal",
+        "suraj@taskmanager.internal",
+      ];
+      for (const email of seededEmails) {
+        await client.query(
+          "UPDATE users SET password_hash = $1, password_reset_required = false WHERE lower(email) = lower($2)",
+          [hashPassword("@12345"), email],
+        );
+      }
     }
 
     // Foreign keys for teams manager and lead
@@ -605,8 +606,17 @@ export async function initializeDatabase() {
     `);
 
     // Seed default teams and users if not exists
+    const isProduction = process.env.NODE_ENV === "production";
     const usersCount = await client.query<{ count: string }>("SELECT COUNT(*) FROM users");
     if (Number(usersCount.rows[0].count) === 0) {
+      const initialAdminPassword = process.env.INITIAL_ADMIN_PASSWORD;
+      if (
+        isProduction &&
+        (!initialAdminPassword || initialAdminPassword.length < 16 || !/[A-Za-z]/.test(initialAdminPassword) || !/\d/.test(initialAdminPassword))
+      ) {
+        throw new Error("Set INITIAL_ADMIN_PASSWORD to a unique password of at least 16 characters before initializing an empty production database.");
+      }
+
       // Create initial teams
       const teamRes = await client.query(
         `INSERT INTO teams (name, description)
@@ -620,8 +630,10 @@ export async function initializeDatabase() {
       const aiTeamId = teamRes.rows[1].id;
       const appTeamId = teamRes.rows[2].id;
 
-      // Seed the Admin and Technical users. Sales members are added manually by an Admin.
-      const seedUsers = [
+      // Production starts with a secure Admin account; development gets demo users.
+      const seedUsers = isProduction ? [
+        { name: "Admin", email: "admin@taskmanager.internal", role: "Admin", dept: "Executive", desig: "System Administrator", teamId: coreTeamId },
+      ] : [
         { name: "Admin", email: "admin@taskmanager.internal", role: "Admin", dept: "Executive", desig: "System Administrator", teamId: coreTeamId },
         { name: "Animesh", email: "animesh@taskmanager.internal", role: "Team Lead", dept: "Technical", desig: "Technical Lead", teamId: coreTeamId },
         { name: "Vaibhav", email: "vaibhav@taskmanager.internal", role: "Individual", dept: "Technical", desig: "Technical Intern", teamId: aiTeamId },
@@ -631,11 +643,12 @@ export async function initializeDatabase() {
 
       const insertedUsers: Record<string, number> = {};
       for (const u of seedUsers) {
+        const seedPassword = isProduction ? initialAdminPassword! : "@12345";
         const uRes = await client.query<{ id: number }>(
           `INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
            VALUES ($1, $7, $2, $8, false, $3, $4, $5, $6)
            RETURNING id`,
-          [u.name, u.email, u.role, u.dept, u.desig, u.teamId, u.email.split("@")[0].toLowerCase(), hashPassword("@12345")],
+          [u.name, u.email, u.role, u.dept, u.desig, u.teamId, u.email.split("@")[0].toLowerCase(), hashPassword(seedPassword)],
         );
         insertedUsers[u.name] = uRes.rows[0].id;
 
@@ -654,23 +667,31 @@ export async function initializeDatabase() {
         );
       }
 
-      // Update team leads and managers
-      await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
-        insertedUsers["Admin"],
-        insertedUsers["Animesh"],
-        coreTeamId,
-      ]);
-      await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
-        insertedUsers["Admin"],
-        insertedUsers["Animesh"],
-        aiTeamId,
-      ]);
-      await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
-        insertedUsers["Admin"],
-        insertedUsers["Rohit"],
-        appTeamId,
-      ]);
+      if (isProduction) {
+        await client.query("UPDATE teams SET manager_id = $1, lead_id = NULL WHERE id = ANY($2::int[])", [
+          insertedUsers["Admin"],
+          [coreTeamId, aiTeamId, appTeamId],
+        ]);
+      } else {
+        // Update team leads and managers
+        await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
+          insertedUsers["Admin"],
+          insertedUsers["Animesh"],
+          coreTeamId,
+        ]);
+        await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
+          insertedUsers["Admin"],
+          insertedUsers["Animesh"],
+          aiTeamId,
+        ]);
+        await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
+          insertedUsers["Admin"],
+          insertedUsers["Rohit"],
+          appTeamId,
+        ]);
+      }
 
+      if (!isProduction) {
       // Seed core Projects
       const seedProjects = [
         { name: "Analytics Portal [AI endpoint usage]", code: "ANA", mgr: "Admin", lead: "Animesh" },
@@ -800,10 +821,11 @@ export async function initializeDatabase() {
           [u],
         );
       }
+      }
     }
 
     // Seed project_allotments if not exists
-    for (const allotment of seedProjectAllotments) {
+    if (!isProduction) for (const allotment of seedProjectAllotments) {
       await client.query(
         `INSERT INTO project_allotments (serial_number, employee_name, project, task_assigned)
          VALUES ($1, $2, $3, $4)

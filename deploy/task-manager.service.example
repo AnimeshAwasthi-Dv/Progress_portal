@@ -1,0 +1,20 @@
+[Unit]
+Description=Task Manager API
+After=network.target
+
+[Service]
+Type=simple
+User=task-manager
+Group=task-manager
+WorkingDirectory=/opt/task-manager
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/task-manager/task-manager.env
+ExecStart=/usr/bin/node /opt/task-manager/server-dist/server/index.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

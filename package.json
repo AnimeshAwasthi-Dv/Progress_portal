@@ -10,6 +10,7 @@
     "test:authorization": "tsx --test server/authorization.test.ts",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "start:server": "node server-dist/server/index.js",
+    "start": "node server-dist/server/index.js",
     "preview": "vite preview"
   },
   "dependencies": {

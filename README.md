@@ -22,9 +22,13 @@ Use **Daily Reports** to review the reports visible to the active user for a sel
 
 ## Identity and access control
 
-The current `x-user-id`/local-storage identity selector is a development simulator, not production authentication. API routes enforce role and project/team membership against PostgreSQL, but a client can spoof another active user ID. Replace the simulator with verified credentials and server-managed sessions before exposing the application to untrusted users.
+Users sign in with their profile credentials. Passwords and session tokens are stored as hashes, sessions are managed by the API, and cookies use `Secure` when `NODE_ENV=production`. Keep the API behind HTTPS and do not expose port 3001 directly.
 
 Employee deactivation is a soft removal that preserves historical records. Active assigned tasks must be reassigned before the account can be deactivated.
+
+## EC2 deployment
+
+See [deploy/EC2.md](deploy/EC2.md) for the production build, systemd service, Nginx reverse proxy, secure environment file, and AWS network setup. The build produces a static frontend in `dist/` and a compiled API in `server-dist/`.
 
 ## Build
 
