@@ -833,7 +833,7 @@ export default function App() {
          
 <div className="relative max-w-2xl">
   <span className="mb-4 inline-block text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">
-    Task Manager Portal
+    DecTrack
   </span>
 
   <h1 className="text-5xl font-black leading-tight tracking-tight xl:text-6xl">
@@ -1425,7 +1425,7 @@ export default function App() {
                         <span className="text-emerald-200/70 text-xs">• Connected to PostgreSQL Database</span>
                       </div>
                       <h1 className="text-xl sm:text-2xl font-black font-display tracking-tight">
-                        Task Manager Portal
+                        DecTrack
                       </h1>
                       <p className="text-emerald-100 text-xs sm:text-sm mt-1 max-w-2xl">
                         Welcome, {role === "Admin" ? "Admin" : currentUser?.name}. {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}.{" "}

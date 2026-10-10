@@ -2,7 +2,7 @@
 
 ## 1. System Overview
 
-The **Task Manager Portal** is a React/TypeScript and Express/PostgreSQL project and task workspace with role-scoped data access.
+The **DecTrack** is a React/TypeScript and Express/PostgreSQL project and task workspace with role-scoped data access.
 
 It provides complete visibility into:
 - **Who assigned what task**

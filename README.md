@@ -1,4 +1,4 @@
-# Task Manager Portal
+# DecTrack
 
 Internal team dashboard backed by a local PostgreSQL database.
 
