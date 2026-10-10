@@ -15,7 +15,7 @@ import {
   FileCheck,
   FileSpreadsheet,
   FolderGit2,
-  Kanban,
+
   LayoutDashboard,
   Link,
   ListTodo,
@@ -34,7 +34,6 @@ import {
   Sparkles,
   TrendingUp,
   User,
-  UserCheck,
   UserPlus,
   Users,
   Workflow,
@@ -48,6 +47,7 @@ import {
   createTask,
   createUser,
   deactivateEmployee,
+  changePassword,
   getCurrentUser,
   getActivityLog,
   getDailyProgressReports,
@@ -63,10 +63,11 @@ import {
   getTeamWorkloadAnalytics,
   getTeams,
   getUsers,
+  login,
+  logout,
   markAllNotificationsRead,
   markNotificationRead,
   saveDailyProgressReport,
-  setActiveUserId,
   submitTaskReview,
   taskPriorityOptions,
   taskStatusOptions,
@@ -139,7 +140,6 @@ type ViewMode =
   | "overview"
   | "my-tasks"
   | "all-tasks"
-  | "kanban"
   | "projects"
   | "team-management"
   | "workload"
@@ -172,6 +172,14 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [loginIdentifier, setLoginIdentifier] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showLoginPassword, setShowLoginPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showUserPassword, setShowUserPassword] = useState(false);
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState("");
@@ -259,12 +267,15 @@ export default function App() {
   const [deactivationReason, setDeactivationReason] = useState("");
   const [userFormData, setUserFormData] = useState({
     name: "",
+    username: "",
     email: "",
+    password: "",
     role: "Individual" as UserRole,
     department: "Technical",
     designation: "Software Engineer",
     teamId: 0,
     projectIds: [] as number[],
+    mustChangePassword: false,
   });
 
   // Initial Data Fetch
@@ -272,6 +283,7 @@ export default function App() {
     try {
       setIsLoading(true);
       const u = await getCurrentUser();
+      setCurrentUser(u);
       const [users, teams, projs, tasks, metricsData, workload, notifs, legacyAllotments] =
         await Promise.all([
           getUsers(),
@@ -284,7 +296,6 @@ export default function App() {
           u.role === "Admin" ? getProjectAllotments() : Promise.resolve([] as ProjectAllotment[]),
         ]);
 
-      setCurrentUser(u);
       setUsersList(users);
       setTeamsList(teams);
       setProjectsList(projs);
@@ -294,7 +305,12 @@ export default function App() {
       setNotifications(notifs);
       setAllotments(legacyAllotments);
     } catch (err: any) {
-      setErrorMessage(err.message || "Failed to load application data.");
+      if (err.message?.includes("sign in") || err.message?.includes("session has expired")) {
+        setCurrentUser(null);
+        setErrorMessage("");
+      } else {
+        setErrorMessage(err.message || "Failed to load application data.");
+      }
     } finally {
       setIsLoading(false);
     }
@@ -306,10 +322,11 @@ export default function App() {
 
   // Fetch daily reports when reportDate changes
   useEffect(() => {
+    if (!currentUser) return;
     getDailyProgressReports(reportDate)
       .then((reports) => setDailyReports(reports))
       .catch((e) => console.error(e));
-  }, [reportDate]);
+  }, [reportDate, currentUser]);
 
   // Load Task Details when selectedTaskId changes
   useEffect(() => {
@@ -332,17 +349,61 @@ export default function App() {
       .catch((e) => setErrorMessage(e.message));
   }, [selectedTaskId]);
 
-  // Handle Switch User (Role Simulator)
-  const handleSwitchUser = async (userId: number) => {
-    setActiveUserId(userId);
+  const handleLoginSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setErrorMessage("");
     setIsLoading(true);
     try {
+      const user = await login(loginIdentifier.trim(), loginPassword);
       await refreshAllData();
-      const targetUser = usersList.find((u) => u.id === userId);
-      setSuccessMessage(`Switched active profile to ${targetUser?.name || "User"}.`);
-      setTimeout(() => setSuccessMessage(""), 3000);
+      if (!user.mustChangePassword) setLoginPassword("");
+      setLoginIdentifier("");
+    } catch (error: any) {
+      setIsLoading(false);
+      setErrorMessage(error.message || "Unable to sign in.");
+    }
+  };
+
+  const handlePasswordChangeSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) {
+      setErrorMessage("The new passwords do not match.");
+      return;
+    }
+    setErrorMessage("");
+    setIsLoading(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setSuccessMessage("Password updated. Your account is ready.");
+      await refreshAllData();
+      setTimeout(() => setSuccessMessage(""), 4000);
     } catch (e: any) {
+      setIsLoading(false);
       setErrorMessage(e.message);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+    } finally {
+      setCurrentUser(null);
+      setUsersList([]);
+      setTeamsList([]);
+      setProjectsList([]);
+      setTasksList([]);
+      setMetrics(null);
+      setWorkloadData([]);
+      setNotifications([]);
+      setAllotments([]);
+      setDailyReports([]);
+      setActivityEvents([]);
+      setCurrentView("overview");
+      setErrorMessage("");
+      setIsLoading(false);
     }
   };
 
@@ -579,12 +640,15 @@ export default function App() {
     try {
       const u = await createUser({
         name: userFormData.name.trim(),
+        username: userFormData.username.trim(),
         email: userFormData.email.trim(),
+        password: userFormData.password,
         role: userFormData.role,
         department: userFormData.department.trim(),
         designation: userFormData.designation.trim(),
         teamId: userFormData.teamId || undefined,
         projectIds: userFormData.projectIds,
+        mustChangePassword: userFormData.mustChangePassword,
       });
       setUsersList((prev) => [...prev, u]);
       setIsUserModalOpen(false);
@@ -627,13 +691,17 @@ export default function App() {
   const openCreateProfile = () => {
     setUserFormData({
       name: "",
+      username: "",
       email: "",
+      password: "",
       role: "Individual",
       department: "Technical",
       designation: "Software Engineer",
       teamId: currentUser?.teamId || teamsList[0]?.id || 0,
       projectIds: [],
+      mustChangePassword: false,
     });
+    setShowUserPassword(false);
     setIsUserModalOpen(true);
     setIsMobileMenuOpen(false);
   };
@@ -718,6 +786,75 @@ export default function App() {
     .sort((left, right) => (left.dueDate || "9999-12-31").localeCompare(right.dueDate || "9999-12-31"))
     .slice(0, 5);
 
+  if (!isLoading && !currentUser) {
+    return (
+      <main className="min-h-screen bg-slate-50 font-sans grid lg:grid-cols-[minmax(0,1fr)_minmax(380px,520px)]">
+        <section className="hidden lg:flex flex-col justify-between bg-emerald-950 p-12 text-white">
+          <div className="flex items-center gap-4">
+            <img src={companyLogo} alt="Dectrocel logo" className="h-16 w-16 rounded-lg bg-white object-contain p-1" />
+            <div>
+              <p className="text-lg font-extrabold">Dectrocel</p>
+              <p className="text-xs font-bold uppercase text-emerald-300">Healthcare and Research</p>
+            </div>
+          </div>
+          <div className="max-w-lg">
+            <p className="text-xs font-bold uppercase text-emerald-300">Task Manager Portal</p>
+            <h1 className="mt-3 text-4xl font-black leading-tight">One workspace for the teams moving care forward.</h1>
+            <p className="mt-4 text-sm leading-relaxed text-emerald-100">Sign in with the username or email provided by your administrator.</p>
+          </div>
+          <p className="text-xs text-emerald-300">Dectrocel Healthcare and Research</p>
+        </section>
+        <section className="flex min-h-screen items-center justify-center p-6 sm:p-10">
+          <div className="w-full max-w-sm">
+            <div className="mb-8 flex items-center gap-3 lg:hidden">
+              <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 object-contain" />
+              <div><p className="font-extrabold text-slate-900">Dectrocel</p><p className="text-[10px] font-bold uppercase text-emerald-700">Healthcare and Research</p></div>
+            </div>
+            <p className="text-xs font-bold uppercase text-emerald-700">Secure sign in</p>
+            <h1 className="mt-2 text-2xl font-black text-slate-900">Welcome back</h1>
+            <p className="mt-2 text-sm text-slate-500">Use your assigned username or work email.</p>
+            {errorMessage && <p role="alert" className="mt-5 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{errorMessage}</p>}
+            <form onSubmit={handleLoginSubmit} className="mt-6 space-y-4">
+              <div>
+                <label htmlFor="login-identifier" className="mb-1 block text-sm font-semibold text-slate-700">Username or email</label>
+                <input id="login-identifier" autoComplete="username" required value={loginIdentifier} onChange={(event) => setLoginIdentifier(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100" />
+              </div>
+              <div>
+                <label htmlFor="login-password" className="mb-1 block text-sm font-semibold text-slate-700">Password</label>
+                <div className="relative">
+                  <input id="login-password" type={showLoginPassword ? "text" : "password"} autoComplete="current-password" required value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 pr-11 text-sm outline-none focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100" />
+                  <button type="button" aria-label={showLoginPassword ? "Hide password" : "Show password"} onClick={() => setShowLoginPassword((visible) => !visible)} className="absolute inset-y-0 right-0 px-3 text-slate-500"><Eye className="h-4 w-4" /></button>
+                </div>
+              </div>
+              <button type="submit" disabled={isLoading} className="w-full rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60">{isLoading ? "Signing in..." : "Sign in"}</button>
+            </form>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (!isLoading && currentUser?.mustChangePassword) {
+    return (
+      <main className="min-h-screen bg-slate-50 font-sans flex items-center justify-center p-6">
+        <section className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-7 shadow-sm">
+          <div className="mb-5 flex items-center gap-3"><img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 object-contain" /><div><p className="font-extrabold text-slate-900">Dectrocel</p><p className="text-[10px] font-bold uppercase text-emerald-700">Healthcare and Research</p></div></div>
+          <h1 className="text-xl font-black text-slate-900">Set a new password</h1>
+          <p className="mt-2 text-sm text-slate-500">Your temporary password must be replaced before opening your dashboard.</p>
+          {errorMessage && <p role="alert" className="mt-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{errorMessage}</p>}
+          {successMessage && <p role="status" className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">{successMessage}</p>}
+          <form onSubmit={handlePasswordChangeSubmit} className="mt-5 space-y-4">
+            <div><label htmlFor="current-password" className="mb-1 block text-sm font-semibold text-slate-700">Temporary password</label><input id="current-password" type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" /></div>
+            <div><label htmlFor="new-password" className="mb-1 block text-sm font-semibold text-slate-700">New password</label><div className="relative"><input id="new-password" type={showNewPassword ? "text" : "password"} minLength={12} maxLength={128} autoComplete="new-password" required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2.5 pr-11 text-sm" /><button type="button" aria-label={showNewPassword ? "Hide new password" : "Show new password"} onClick={() => setShowNewPassword((visible) => !visible)} className="absolute inset-y-0 right-0 px-3 text-slate-500"><Eye className="h-4 w-4" /></button></div><p className="mt-1 text-xs text-slate-500">Use 12-128 characters with at least one letter and one number.</p></div>
+            <div><label htmlFor="confirm-password" className="mb-1 block text-sm font-semibold text-slate-700">Confirm new password</label><input id="confirm-password" type="password" autoComplete="new-password" required value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 px-3 py-2.5 text-sm" /></div>
+            <button type="submit" disabled={isLoading} className="w-full rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800 disabled:opacity-60">Update password</button>
+            <button type="button" onClick={handleLogout} className="w-full py-2 text-sm font-semibold text-slate-600 hover:text-slate-900">Sign out</button>
+          </form>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <div className="h-screen overflow-hidden bg-slate-50 text-slate-900 font-sans flex flex-col">
       {/* Top Navigation Bar in Green & White Theme */}
@@ -735,19 +872,8 @@ export default function App() {
         <div className="flex items-center gap-3">
           {/* Active User Name / Persona Selector */}
           <div className="flex items-center bg-emerald-50/70 border border-emerald-200 rounded-lg px-3 py-1.5 text-xs">
-            <UserCheck className="w-4 h-4 text-emerald-600 mr-2 shrink-0" />
-            <span className="text-emerald-900 font-bold mr-1.5 hidden sm:inline">Current User:</span>
-            <select
-              value={currentUser?.id || 1}
-              onChange={(e) => handleSwitchUser(Number(e.target.value))}
-              className="bg-transparent font-bold text-emerald-950 outline-none cursor-pointer pr-1"
-            >
-              {usersList.map((u) => (
-                u.isActive && <option key={u.id} value={u.id}>
-                  {u.name} {u.name === "Admin" ? "(Organization Admin)" : `(${u.role})`}
-                </option>
-              ))}
-            </select>
+            <span className="text-emerald-900 font-bold">{currentUser?.name} · {currentUser?.role}</span>
+            <button onClick={handleLogout} className="ml-3 text-rose-700 font-bold hover:underline">Sign out</button>
           </div>
 
           {/* Notifications Trigger */}
@@ -973,21 +1099,6 @@ export default function App() {
                 <span>Activity Logs</span>
               </button>
             )}
-
-            <button
-              onClick={() => {
-                setCurrentView("kanban");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
-                currentView === "kanban"
-                  ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                  : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
-              }`}
-            >
-              <Kanban className="w-4 h-4 text-emerald-600" />
-              <span>Kanban Board</span>
-            </button>
 
             <button
               onClick={() => {
@@ -1665,81 +1776,6 @@ export default function App() {
                 </div>
               )}
 
-              {/* ----------------- VIEW 3: KANBAN BOARD ----------------- */}
-              {currentView === "kanban" && (
-                <div className="space-y-6 max-w-7xl mx-auto">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
-                        Kanban Board
-                      </h1>
-                      <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                        Backlog → To Do → In Progress → In Review → Completed (plus Blocked)
-                      </p>
-                    </div>
-                    {canAssignTasks && (
-                      <button
-                        onClick={handleOpenCreateTask}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm px-3.5 py-2 rounded-xl flex items-center gap-1.5 shadow-sm"
-                      >
-                        <Plus className="w-4 h-4" />
-                        Create Task
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Kanban Columns */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-6 gap-4 overflow-x-auto pb-4">
-                    {taskStatusOptions.map((status) => {
-                      const statusTasks = filteredTasks.filter((t) => t.status === status);
-                      return (
-                        <div
-                          key={status}
-                          className="bg-slate-100/70 border border-slate-200/80 rounded-xl p-3 flex flex-col min-h-[500px]"
-                        >
-                          <div className="flex items-center justify-between pb-3 mb-2 border-b border-slate-200">
-                            <span className="font-bold text-xs text-slate-800 flex items-center gap-1.5">
-                              <span className={`w-2 h-2 rounded-full ${statusBadgeStyles[status].dot}`} />
-                              {status}
-                            </span>
-                            <span className="text-xs font-bold text-slate-500 bg-white px-2 py-0.5 rounded-full border border-slate-200">
-                              {statusTasks.length}
-                            </span>
-                          </div>
-
-                          <div className="space-y-2.5 flex-1 overflow-y-auto">
-                            {statusTasks.map((task) => (
-                              <div
-                                key={task.id}
-                                onClick={() => setSelectedTaskId(task.id)}
-                                className="bg-white p-3 rounded-lg border border-slate-200 shadow-xs hover:border-emerald-300 transition cursor-pointer"
-                              >
-                                <div className="flex items-center justify-between mb-1.5">
-                                  <span className="font-mono text-[10px] font-bold text-slate-500">
-                                    {task.taskCode}
-                                  </span>
-                                  <span className={`badge ${priorityBadgeStyles[task.priority].bg} text-[10px]`}>
-                                    {task.priority}
-                                  </span>
-                                </div>
-                                <h4 className="font-bold text-xs text-slate-900 line-clamp-2">{task.title}</h4>
-                                <p className="text-[11px] text-slate-500 mt-1 truncate">{task.projectName}</p>
-                                <div className="flex items-center justify-between mt-3 pt-2 border-t border-slate-100 text-[11px]">
-                                  <span className="text-emerald-800 font-bold truncate max-w-[100px]">
-                                    {task.assignedToName}
-                                  </span>
-                                  <span className="text-slate-400 text-[10px]">{task.dueDate || "No due date"}</span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
               {/* ----------------- VIEW 4: PROJECTS VIEW ----------------- */}
               {currentView === "projects" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
@@ -1903,14 +1939,6 @@ export default function App() {
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
-                              {admin.isActive && (
-                                <button
-                                  onClick={() => handleSwitchUser(admin.id)}
-                                  className="text-xs text-emerald-700 bg-emerald-100/80 hover:bg-emerald-200 font-bold px-3 py-1.5 rounded-lg transition"
-                                >
-                                  Login as Admin
-                                </button>
-                              )}
                               {admin.isActive && adminUsers.filter((user) => user.isActive).length > 1 && (
                                 <button
                                   onClick={() => {
@@ -1985,14 +2013,6 @@ export default function App() {
                               </div>
 
                               <div className="flex justify-end gap-2 pt-1">
-                                {lead.isActive && (
-                                  <button
-                                    onClick={() => handleSwitchUser(lead.id)}
-                                    className="text-xs text-teal-700 bg-teal-50 hover:bg-teal-100 font-bold px-3 py-1.5 rounded-lg transition"
-                                  >
-                                    Act as {lead.name}
-                                  </button>
-                                )}
                                 {role === "Admin" && lead.isActive && (
                                   <button
                                     onClick={() => {
@@ -2103,14 +2123,6 @@ export default function App() {
                               <p className="text-[11px] text-slate-500">{new Set(icTasks.map((task) => task.projectId)).size} assigned project(s)</p>
 
                               <div className="flex justify-end gap-2 pt-1">
-                                {ic.isActive && (
-                                  <button
-                                    onClick={() => handleSwitchUser(ic.id)}
-                                    className="w-full text-xs text-emerald-800 bg-emerald-50 hover:bg-emerald-100 font-bold py-1.5 rounded-lg transition"
-                                  >
-                                    Switch to {ic.name}
-                                  </button>
-                                )}
                                 {canManageEmployees && ic.isActive && (
                                   <button
                                     onClick={() => {
@@ -3380,6 +3392,21 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 />
               </div>
               <div>
+                <label className="block font-bold text-slate-700 mb-1">Username *</label>
+                <input
+                  type="text"
+                  required
+                  minLength={3}
+                  maxLength={40}
+                  pattern="[A-Za-z0-9._-]+"
+                  autoComplete="username"
+                  placeholder="e.g. rahul.sharma"
+                  value={userFormData.username}
+                  onChange={(e) => setUserFormData({ ...userFormData, username: e.target.value })}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                />
+              </div>
+              <div>
                 <label className="block font-bold text-slate-700 mb-1">Corporate Email *</label>
                 <input
                   type="email"
@@ -3389,6 +3416,43 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                   onChange={(e) => setUserFormData({ ...userFormData, email: e.target.value })}
                   className="w-full px-3 py-2 border border-slate-200 rounded-lg"
                 />
+              </div>
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Password *</label>
+                <div className="relative">
+                  <input
+                    type={showUserPassword ? "text" : "password"}
+                    required
+                    minLength={12}
+                    maxLength={128}
+                    autoComplete="new-password"
+                    placeholder="Min. 12 characters"
+                    value={userFormData.password}
+                    onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
+                    className="w-full px-3 py-2 pr-10 border border-slate-200 rounded-lg"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showUserPassword ? "Hide password" : "Show password"}
+                    onClick={() => setShowUserPassword((v) => !v)}
+                    className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700"
+                  >
+                    <Eye className="h-4 w-4" />
+                  </button>
+                </div>
+                <p className="mt-1 text-[11px] text-slate-500">12–128 characters with at least one letter and one number.</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  id="must-change-password"
+                  type="checkbox"
+                  checked={userFormData.mustChangePassword}
+                  onChange={(e) => setUserFormData({ ...userFormData, mustChangePassword: e.target.checked })}
+                  className="h-4 w-4 rounded border-slate-300 accent-emerald-600"
+                />
+                <label htmlFor="must-change-password" className="text-xs text-slate-600 select-none cursor-pointer">
+                  Require employee to change password on first login
+                </label>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

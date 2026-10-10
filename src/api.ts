@@ -31,12 +31,14 @@ export const taskPriorityOptions: TaskPriority[] = [
 export type User = {
   id: number;
   name: string;
+  username: string;
   email: string;
   role: UserRole;
   department: string;
   designation: string;
   avatarUrl?: string | null;
   isActive: boolean;
+  mustChangePassword: boolean;
   teamId?: number | null;
   teamName?: string | null;
   createdAt: string;
@@ -286,23 +288,12 @@ export type DailyProgressReport = {
 
 export type NewDailyProgressReport = Omit<DailyProgressReport, "id">;
 
-let activeUserId: number = Number(localStorage.getItem("active_user_id") || "1");
-
-export function getActiveUserId(): number {
-  return activeUserId;
-}
-
-export function setActiveUserId(id: number) {
-  activeUserId = id;
-  localStorage.setItem("active_user_id", String(id));
-}
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      "x-user-id": String(activeUserId),
       ...init?.headers,
     },
   });
@@ -319,10 +310,29 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(message);
   }
 
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
 // User & Auth APIs
+export function login(identifier: string, password: string) {
+  return request<User>("/api/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ identifier, password }),
+  });
+}
+
+export function logout() {
+  return request<void>("/api/auth/logout", { method: "POST" });
+}
+
+export function changePassword(currentPassword: string, newPassword: string) {
+  return request<User>("/api/auth/change-password", {
+    method: "POST",
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+}
+
 export function getCurrentUser() {
   return request<User>("/api/auth/me");
 }
@@ -333,12 +343,15 @@ export function getUsers() {
 
 export function createUser(userData: {
   name: string;
+  username: string;
   email: string;
+  password: string;
   role: UserRole;
   department: string;
   designation: string;
   teamId?: number | null;
   projectIds?: number[];
+  mustChangePassword?: boolean;
 }) {
   return request<User>("/api/users", {
     method: "POST",

@@ -18,6 +18,11 @@ import {
   updateProjectAllotmentProgress,
   listUsers,
   getUserById,
+  authenticateUser,
+  createAuthSession,
+  getUserForSession,
+  revokeAuthSession,
+  changeUserPassword,
   updateUserRoleAndStatus,
   createUser,
   listTeams,
@@ -61,6 +66,8 @@ const userRoleOptions: UserRole[] = ["Admin", "Manager", "Team Lead", "Individua
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
+const loginAttempts = new Map<string, { count: number; resetAt: number }>();
+const sessionCookieName = "task_manager_session";
 
 app.use(express.json({ limit: "64kb" }));
 
@@ -69,25 +76,46 @@ declare global {
   namespace Express {
     interface Request {
       currentUser?: User;
+      sessionToken?: string;
     }
   }
 }
 
-// Development identity simulator; production must replace this with verified credentials/sessions.
+function readSessionCookie(request: Request) {
+  const cookies = request.headers.cookie?.split(";") || [];
+  const cookie = cookies.map((entry) => entry.trim()).find((entry) => entry.startsWith(`${sessionCookieName}=`));
+  return cookie ? decodeURIComponent(cookie.slice(sessionCookieName.length + 1)) : null;
+}
+
+function setSessionCookie(response: Response, token: string) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  response.setHeader("Set-Cookie", `${sessionCookieName}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/${secure}`);
+}
+
+function clearSessionCookie(response: Response) {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  response.setHeader("Set-Cookie", `${sessionCookieName}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`);
+}
+
+function validPassword(password: string) {
+  return password.length >= 12 && password.length <= 128 && /[A-Za-z]/.test(password) && /\d/.test(password);
+}
+
 async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
-    const rawUserId = req.headers["x-user-id"];
-    const userId = typeof rawUserId === "string" ? Number(rawUserId) : NaN;
-    if (!Number.isSafeInteger(userId) || userId < 1) {
-      res.status(401).json({ error: "Unauthorized: A valid development identity is required." });
+    const token = readSessionCookie(req);
+    if (!token) {
+      res.status(401).json({ error: "Please sign in to continue." });
       return;
     }
-    const user = await getUserById(userId);
-    if (!user || !user.isActive) {
-      res.status(401).json({ error: "Unauthorized: User session is invalid or inactive." });
+    const user = await getUserForSession(token);
+    if (!user) {
+      clearSessionCookie(res);
+      res.status(401).json({ error: "Your session has expired. Please sign in again." });
       return;
     }
     req.currentUser = user;
+    req.sessionToken = token;
     next();
   } catch (err) {
     next(err);
@@ -143,6 +171,68 @@ app.get(
 
 // ----------------- Auth & Current User APIs ----------------- //
 
+app.post(
+  "/api/auth/login",
+  asyncRoute(async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const identifier = typeof body.identifier === "string" ? body.identifier.trim() : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    if (!identifier || !password || identifier.length > 254 || password.length > 128) {
+      res.status(400).json({ error: "Enter your username or email and password." });
+      return;
+    }
+    const address = req.ip || req.socket.remoteAddress || "unknown";
+    const now = Date.now();
+    const attempts = loginAttempts.get(address);
+    if (attempts && attempts.resetAt > now && attempts.count >= 10) {
+      res.status(429).json({ error: "Too many sign-in attempts. Try again in 15 minutes." });
+      return;
+    }
+    const user = await authenticateUser(identifier, password);
+    if (!user) {
+      const current = attempts && attempts.resetAt > now ? attempts : { count: 0, resetAt: now + 15 * 60 * 1000 };
+      current.count += 1;
+      loginAttempts.set(address, current);
+      res.status(401).json({ error: "Username/email or password is incorrect." });
+      return;
+    }
+    loginAttempts.delete(address);
+    const token = await createAuthSession(user.id);
+    setSessionCookie(res, token);
+    res.json(user);
+  }),
+);
+
+app.post(
+  "/api/auth/logout",
+  asyncRoute(async (req, res) => {
+    const token = readSessionCookie(req);
+    if (token) await revokeAuthSession(token);
+    clearSessionCookie(res);
+    res.status(204).end();
+  }),
+);
+
+app.post(
+  "/api/auth/change-password",
+  authMiddleware,
+  asyncRoute(async (req, res) => {
+    const body = req.body as Record<string, unknown>;
+    const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
+    const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+    if (!validPassword(newPassword)) {
+      res.status(400).json({ error: "Use a password of 12-128 characters with at least one letter and one number." });
+      return;
+    }
+    const updated = await changeUserPassword(req.currentUser!.id, currentPassword, newPassword, req.sessionToken!);
+    if (!updated) {
+      res.status(400).json({ error: "Current password is incorrect." });
+      return;
+    }
+    res.json(updated);
+  }),
+);
+
 app.get(
   "/api/auth/me",
   authMiddleware,
@@ -164,9 +254,15 @@ app.post(
   authMiddleware,
   requireRole(["Admin", "Team Lead"]),
   asyncRoute(async (req, res) => {
-    const { name, email, role, department, designation, teamId, projectIds } = req.body as Record<string, unknown>;
-    if (!name || typeof name !== "string" || !email || typeof email !== "string" || !role || typeof role !== "string" || !userRoleOptions.includes(role as UserRole)) {
-      res.status(400).json({ error: "Valid name, email, and role (Admin, Manager, Team Lead, Individual) are required." });
+    const { name, username, email, password, role, department, designation, teamId, projectIds, mustChangePassword } = req.body as Record<string, unknown>;
+    if (
+      typeof name !== "string" || !name.trim() || name.length > 120 ||
+      typeof username !== "string" || !/^[a-zA-Z0-9._-]{3,40}$/.test(username) ||
+      typeof email !== "string" || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254 ||
+      typeof password !== "string" || !validPassword(password) ||
+      typeof role !== "string" || !userRoleOptions.includes(role as UserRole)
+    ) {
+      res.status(400).json({ error: "Provide a valid name, username, email, password, and role. Passwords require 12-128 characters with a letter and number." });
       return;
     }
     if (req.currentUser?.role === "Team Lead" && role !== "Individual") {
@@ -196,13 +292,16 @@ app.post(
     }
     const newUser = await createUser({
       name: name.trim(),
+      username: username.trim().toLowerCase(),
       email: email.trim().toLowerCase(),
+      password,
       role: role as UserRole,
       department: typeof department === "string" && department.trim() ? department.trim() : "Technical",
       designation: typeof designation === "string" && designation.trim() ? designation.trim() : "Software Engineer",
       teamId: assignedTeamId,
       createdByUserId: creator.id,
       projectIds: authorizedProjectIds,
+      mustChangePassword: mustChangePassword === true,
     });
     res.status(201).json(newUser);
   }),

@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { Pool } from "pg";
 import { seedProjectAllotments } from "./seedProjectAllotments.js";
 
@@ -26,12 +27,14 @@ export type ReviewDecision = "Approved" | "Changes Requested";
 export type User = {
   id: number;
   name: string;
+  username: string;
   email: string;
   role: UserRole;
   department: string;
   designation: string;
   avatarUrl?: string | null;
   isActive: boolean;
+  mustChangePassword: boolean;
   teamId?: number | null;
   teamName?: string | null;
   createdAt: string;
@@ -50,6 +53,23 @@ export type Team = {
   createdAt: string;
   updatedAt: string;
 };
+
+function hashPassword(password: string, salt = randomBytes(16)) {
+  return `scrypt$${salt.toString("hex")}$${scryptSync(password, salt, 64).toString("hex")}`;
+}
+
+function verifyPassword(password: string, storedHash: string) {
+  const [algorithm, saltHex, hashHex] = storedHash.split("$");
+  if (algorithm !== "scrypt" || !saltHex || !hashHex) return false;
+  const salt = Buffer.from(saltHex, "hex");
+  const expected = Buffer.from(hashHex, "hex");
+  const actual = scryptSync(password, salt, expected.length);
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function hashSessionToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
 
 export type Project = {
   id: number;
@@ -297,8 +317,10 @@ export async function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+        username TEXT,
         email TEXT NOT NULL UNIQUE CHECK (length(trim(email)) > 0),
-        password_hash TEXT NOT NULL DEFAULT 'password123',
+        password_hash TEXT NOT NULL,
+        password_reset_required BOOLEAN NOT NULL DEFAULT true,
         role TEXT NOT NULL CHECK (role IN ('Admin', 'Manager', 'Team Lead', 'Individual')),
         department TEXT NOT NULL DEFAULT 'Technical',
         designation TEXT NOT NULL DEFAULT 'Software Engineer',
@@ -309,6 +331,56 @@ export async function initializeDatabase() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_required BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE users ALTER COLUMN password_hash DROP DEFAULT;
+    `);
+    await client.query(`
+      UPDATE users
+      SET username = COALESCE(NULLIF(lower(regexp_replace(trim(name), '[^a-zA-Z0-9._-]+', '.', 'g')), ''), 'user') || id::text
+      WHERE username IS NULL OR trim(username) = ''
+    `);
+    await client.query("ALTER TABLE users ALTER COLUMN username SET NOT NULL");
+    await client.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (lower(username))");
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL
+      )
+    `);
+    await client.query("CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_expiry ON auth_sessions(user_id, expires_at)");
+
+    const legacyPasswords = await client.query<{ id: number }>(
+      "SELECT id FROM users WHERE password_hash = 'password123'",
+    );
+    for (const legacyUser of legacyPasswords.rows) {
+      await client.query(
+        "UPDATE users SET password_hash = $2, password_reset_required = true WHERE id = $1",
+        [legacyUser.id, hashPassword("password123")],
+      );
+    }
+
+    // Reset all seeded users to the new default password and clear the force-change flag
+    const seededEmails = [
+      "admin@taskmanager.internal",
+      "animesh@taskmanager.internal",
+      "vaibhav@taskmanager.internal",
+      "sakshi@taskmanager.internal",
+      "suraj@taskmanager.internal",
+      "rohit@taskmanager.internal",
+      "neha@taskmanager.internal",
+    ];
+    for (const email of seededEmails) {
+      await client.query(
+        "UPDATE users SET password_hash = $1, password_reset_required = false WHERE lower(email) = lower($2)",
+        [hashPassword("@12345"), email],
+      );
+    }
 
     // Foreign keys for teams manager and lead
     await client.query(`
@@ -563,10 +635,10 @@ export async function initializeDatabase() {
       const insertedUsers: Record<string, number> = {};
       for (const u of seedUsers) {
         const uRes = await client.query<{ id: number }>(
-          `INSERT INTO users (name, email, password_hash, role, department, designation, team_id)
-           VALUES ($1, $2, 'password123', $3, $4, $5, $6)
+          `INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
+           VALUES ($1, $7, $2, $8, false, $3, $4, $5, $6)
            RETURNING id`,
-          [u.name, u.email, u.role, u.dept, u.desig, u.teamId],
+          [u.name, u.email, u.role, u.dept, u.desig, u.teamId, u.email.split("@")[0].toLowerCase(), hashPassword("@12345")],
         );
         insertedUsers[u.name] = uRes.rows[0].id;
 
@@ -767,11 +839,16 @@ export async function listUsers(viewer?: AccessUser) {
       whereClause = "WHERE u.id = $1";
       values.push(viewer.id);
     } else {
+      // Manager / Team Lead: see themselves + all active users who share any team
+      // with the viewer (teams the viewer leads, manages, or is a member of)
       whereClause = `WHERE u.id = $1 OR (u.is_active = true AND EXISTS (
-        SELECT 1 FROM team_members target_membership
-        JOIN teams authorized_team ON authorized_team.id = target_membership.team_id
-        WHERE target_membership.user_id = u.id
-          AND (authorized_team.manager_id = $1 OR authorized_team.lead_id = $1)
+        SELECT 1 FROM team_members target_tm
+        WHERE target_tm.user_id = u.id
+          AND target_tm.team_id IN (
+            SELECT t.id FROM teams t
+            LEFT JOIN team_members my_tm ON my_tm.team_id = t.id AND my_tm.user_id = $1
+            WHERE t.manager_id = $1 OR t.lead_id = $1 OR my_tm.user_id IS NOT NULL
+          )
       ))`;
       values.push(viewer.id);
     }
@@ -780,12 +857,14 @@ export async function listUsers(viewer?: AccessUser) {
     SELECT 
       u.id,
       u.name,
+      u.username,
       u.email,
       u.role,
       u.department,
       u.designation,
       u.avatar_url AS "avatarUrl",
       u.is_active AS "isActive",
+      u.password_reset_required AS "mustChangePassword",
       u.team_id AS "teamId",
       t.name AS "teamName",
       u.created_at AS "createdAt",
@@ -803,12 +882,14 @@ export async function getUserById(id: number) {
     SELECT 
       u.id,
       u.name,
+      u.username,
       u.email,
       u.role,
       u.department,
       u.designation,
       u.avatar_url AS "avatarUrl",
       u.is_active AS "isActive",
+      u.password_reset_required AS "mustChangePassword",
       u.team_id AS "teamId",
       t.name AS "teamName",
       u.created_at AS "createdAt",
@@ -818,6 +899,67 @@ export async function getUserById(id: number) {
     WHERE u.id = $1
   `, [id]);
   return rows[0] ?? null;
+}
+
+export async function authenticateUser(identifier: string, password: string) {
+  const { rows } = await pool.query<{ id: number; passwordHash: string }>(`
+    SELECT id, password_hash AS "passwordHash"
+    FROM users
+    WHERE is_active = true AND (lower(username) = lower($1) OR lower(email) = lower($1))
+  `, [identifier]);
+  const account = rows[0];
+  if (!account) return null;
+
+  let valid = verifyPassword(password, account.passwordHash);
+  if (!valid && account.passwordHash === "password123" && password === "password123") {
+    const migratedHash = hashPassword(password);
+    await pool.query(
+      "UPDATE users SET password_hash = $2, password_reset_required = true WHERE id = $1",
+      [account.id, migratedHash],
+    );
+    valid = true;
+  }
+  return valid ? getUserById(account.id) : null;
+}
+
+export async function createAuthSession(userId: number) {
+  const token = randomBytes(32).toString("base64url");
+  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  await pool.query(
+    "INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)",
+    [hashSessionToken(token), userId, expiresAt],
+  );
+  return token;
+}
+
+export async function getUserForSession(token: string) {
+  const { rows } = await pool.query<{ userId: number }>(`
+    SELECT s.user_id AS "userId"
+    FROM auth_sessions s
+    JOIN users u ON u.id = s.user_id
+    WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.is_active = true
+  `, [hashSessionToken(token)]);
+  return rows[0] ? getUserById(rows[0].userId) : null;
+}
+
+export async function revokeAuthSession(token: string) {
+  await pool.query("DELETE FROM auth_sessions WHERE token_hash = $1", [hashSessionToken(token)]);
+}
+
+export async function changeUserPassword(userId: number, currentPassword: string, newPassword: string, sessionToken: string) {
+  const { rows } = await pool.query<{ passwordHash: string }>(
+    "SELECT password_hash AS \"passwordHash\" FROM users WHERE id = $1 AND is_active = true",
+    [userId],
+  );
+  const account = rows[0];
+  if (!account || !verifyPassword(currentPassword, account.passwordHash)) return null;
+
+  await pool.query(
+    "UPDATE users SET password_hash = $2, password_reset_required = false, updated_at = NOW() WHERE id = $1",
+    [userId, hashPassword(newPassword)],
+  );
+  await pool.query("DELETE FROM auth_sessions WHERE user_id = $1 AND token_hash <> $2", [userId, hashSessionToken(sessionToken)]);
+  return getUserById(userId);
 }
 
 export async function updateUserRoleAndStatus(
@@ -1023,6 +1165,7 @@ export async function deactivateUser(
 
     await client.query("DELETE FROM project_members WHERE user_id = $1", [targetUserId]);
     await client.query("DELETE FROM team_members WHERE user_id = $1", [targetUserId]);
+    await client.query("DELETE FROM auth_sessions WHERE user_id = $1", [targetUserId]);
     await client.query("UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1", [targetUserId]);
     await client.query(`
       INSERT INTO user_audit_history (actor_user_id, target_user_id, action, reason)
@@ -1040,22 +1183,26 @@ export async function deactivateUser(
 
 export async function createUser(input: {
   name: string;
+  username: string;
   email: string;
+  password: string;
   role: UserRole;
   department: string;
   designation: string;
   teamId?: number | null;
   createdByUserId?: number;
   projectIds?: number[];
+  mustChangePassword?: boolean;
 }) {
   const client = await pool.connect();
+  const passwordResetRequired = input.mustChangePassword !== false;
   try {
     await client.query("BEGIN");
     const { rows } = await client.query<{ id: number }>(`
-      INSERT INTO users (name, email, role, department, designation, team_id)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
+      VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8)
       RETURNING id
-    `, [input.name, input.email, input.role, input.department, input.designation, input.teamId || null]);
+    `, [input.name, input.username, input.email, hashPassword(input.password), input.role, input.department, input.designation, input.teamId || null, passwordResetRequired]);
     const userId = rows[0].id;
     if (input.teamId) {
       await client.query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [input.teamId, userId]);
@@ -1088,7 +1235,10 @@ export async function listTeams(viewer?: AccessUser) {
   const values: unknown[] = [];
   let whereClause = "";
   if (viewer && viewer.role !== "Admin") {
-    whereClause = "WHERE t.manager_id = $1 OR t.lead_id = $1";
+    // Team Leads / Managers see teams they lead, manage, or are a member of
+    whereClause = `WHERE t.manager_id = $1 OR t.lead_id = $1 OR EXISTS (
+      SELECT 1 FROM team_members tm WHERE tm.team_id = t.id AND tm.user_id = $1
+    )`;
     values.push(viewer.id);
   }
   const { rows } = await pool.query<Team>(`
