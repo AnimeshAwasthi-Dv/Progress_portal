@@ -52,15 +52,54 @@
 html {
   min-width: 320px;
   background: var(--app-bg);
+  scroll-padding-top: 1rem;
 }
 
 body {
   min-width: 320px;
   min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
   overflow-x: hidden;
   color: var(--heading);
   background: var(--app-bg);
+}
+
+#root {
+  min-width: 320px;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+/* Keep long forms and dialogs usable on short screens and at high zoom. */
+[class~="fixed"][class~="inset-0"][class~="z-50"][class*="bg-slate-900/50"] {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+  padding-right: max(0.5rem, env(safe-area-inset-right));
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  padding-left: max(0.5rem, env(safe-area-inset-left));
+  align-items: flex-start;
+}
+
+[class~="fixed"][class~="inset-0"][class~="z-50"][class*="bg-slate-900/50"] > :first-child {
+  max-height: calc(100vh - 1rem);
+  max-height: calc(100dvh - 1rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-block: auto;
+}
+
+@media (max-width: 639px) {
+  [class~="fixed"][class~="inset-0"][class~="z-50"][class*="bg-slate-900/50"] [class~="grid-cols-2"] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 640px) {
+  [class~="fixed"][class~="inset-0"][class~="z-50"][class*="bg-slate-900/50"] {
+    align-items: center;
+  }
 }
 
 /* Selection */
@@ -147,6 +186,13 @@ textarea {
     box-shadow 150ms ease;
 }
 
+input,
+select,
+textarea {
+  min-width: 0;
+  max-width: 100%;
+}
+
 /* Dashboard surfaces */
 .bg-white {
   background-color: #ffffff;
@@ -231,4 +277,3 @@ textarea:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
-```

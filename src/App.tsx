@@ -977,7 +977,7 @@ export default function App() {
   }
 
   return (
-    <div className="h-screen overflow-hidden bg-slate-50 text-slate-900 font-sans flex flex-col">
+    <div className="h-[100dvh] min-h-[100dvh] overflow-hidden bg-slate-50 text-slate-900 font-sans flex flex-col">
       {/* Top Navigation Bar in Green & White Theme */}
       <header className="sticky top-0 z-30 bg-white border-b border-indigo-100 px-4 lg:px-8 py-3 flex items-center justify-between shadow-sm lg:ml-64">
         <div className="flex items-center gap-4">
@@ -990,13 +990,13 @@ export default function App() {
           </button>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
           {/* Active User chip */}
-          <div className="flex items-center bg-indigo-50 border border-indigo-200 rounded-lg px-3 py-1.5 text-xs gap-2">
+          <div className="flex min-w-0 max-w-full items-center bg-indigo-50 border border-indigo-200 rounded-lg px-2 sm:px-3 py-1.5 text-xs gap-2">
             <div className="w-6 h-6 rounded-full bg-indigo-200 text-indigo-800 font-bold flex items-center justify-center text-[10px]">
               {initials(currentUser?.name)}
             </div>
-            <span className="text-indigo-900 font-bold">{currentUser?.name} – {currentUser?.role}</span>
+            <span className="min-w-0 max-w-28 truncate text-indigo-900 font-bold sm:max-w-none">{currentUser?.name} – {currentUser?.role}</span>
             <button onClick={handleLogout} className="ml-1 flex items-center gap-1 text-rose-600 font-bold hover:text-rose-800 transition">
               <Shield className="w-3 h-3" />
               Sign out
@@ -1017,7 +1017,7 @@ export default function App() {
             </button>
 
             {notificationsOpen && (
-              <div className="absolute right-0 mt-2 w-80 sm:w-96 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-4">
+              <div className="absolute right-0 mt-2 w-[min(24rem,calc(100vw-1rem))] bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-4">
                 <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                   <div className="flex items-center gap-2">
                     <span className="font-bold text-sm text-slate-900">Notifications & Alerts</span>
@@ -1820,7 +1820,7 @@ export default function App() {
                   {/* Tasks Table */}
                   <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
                     <div className="overflow-x-auto">
-                      <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                      <table className="min-w-[1050px] w-full text-left border-collapse text-xs sm:text-sm">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[11px]">
                             <th className="py-3 px-4">Task ID</th>
@@ -2712,7 +2712,7 @@ export default function App() {
                     {activityEvents.length === 0 ? (
                       <p className="p-8 text-sm text-center text-slate-500">No activity is available in your authorized scope.</p>
                     ) : (
-                      <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                      <table className="min-w-[760px] w-full text-left border-collapse text-xs sm:text-sm">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[11px]">
                             <th className="p-3">Time</th><th className="p-3">Actor</th><th className="p-3">Type</th><th className="p-3">Event</th><th className="p-3">Record</th><th className="p-3">Details</th>
@@ -2750,8 +2750,8 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-                    <table className="w-full text-left border-collapse text-xs sm:text-sm">
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-x-auto">
+                    <table className="min-w-[900px] w-full text-left border-collapse text-xs sm:text-sm">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[11px]">
                           <th className="py-3 px-4">S.No</th>
@@ -3578,9 +3578,9 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
       {/* ----------------- MODAL: CREATE EMPLOYEE PROFILE ----------------- */}
       {isUserModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-4 sm:p-6 shadow-2xl space-y-4">
             <h3 className="text-base font-bold text-slate-900 font-display">Create Employee Profile</h3>
-            <form onSubmit={handleCreateUserSubmit} className="space-y-3.5 text-xs sm:text-sm">
+            <form onSubmit={handleCreateUserSubmit} className="min-h-0 space-y-3.5 text-xs sm:text-sm">
               <div>
                 <label className="block font-bold text-slate-700 mb-1">Full Name *</label>
                 <input
@@ -3735,7 +3735,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                   />
                 </div>
               </div>
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="sticky bottom-0 flex justify-end gap-2 border-t border-slate-100 bg-white pt-3 pb-1">
                 <button
                   type="button"
                   onClick={() => setIsUserModalOpen(false)}
