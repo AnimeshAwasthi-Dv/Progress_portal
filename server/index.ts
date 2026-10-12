@@ -1,4 +1,5 @@
 import "dotenv/config";
+import compression from "compression";
 import express, { type ErrorRequestHandler, type Request, type Response, type NextFunction } from "express";
 import {
   createProjectAllotments,
@@ -76,6 +77,17 @@ if (process.env.NODE_ENV === "production") {
 }
 
 app.use(express.json({ limit: "64kb" }));
+app.use(compression());
+app.use("/api", (_request, response, next) => {
+  response.setHeader("Cache-Control", "private, no-store");
+  next();
+});
+
+// Session discovery is public; protected endpoints continue to require authentication.
+app.get("/api/auth/session", asyncRoute(async (request, response) => {
+  const token = readSessionCookie(request);
+  response.json(token ? await getUserForSession(token) : null);
+}));
 
 // Express Request augmentation
 declare global {

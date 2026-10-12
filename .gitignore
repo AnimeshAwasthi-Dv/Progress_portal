@@ -1,4 +1,7 @@
 node_modules/
+test-results/
+playwright-report/
+performance-results/
 dist/
 server-dist/
 *.tsbuildinfo

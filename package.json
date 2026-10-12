@@ -4,16 +4,22 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "test:ui": "playwright test",
+    "test:performance": "tsx --test server/performance.test.ts",
+    "perf:serve": "node scripts/performance-server.mjs",
+    "perf:audit": "lighthouse http://127.0.0.1:4173 --only-categories=performance,accessibility,best-practices,seo --output=html --output=json --output-path=./performance-results/lighthouse --chrome-flags=--headless",
     "dev": "concurrently -k -n api,web \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "tsx watch server/index.ts",
     "dev:client": "vite",
     "test:authorization": "tsx --test server/authorization.test.ts",
-    "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
+    "build": "tsc -b && tsc -p tsconfig.server.json && vite build && tsx --tsconfig tsconfig.app.json scripts/prerender.tsx",
     "start:server": "node server-dist/server/index.js",
     "start": "node server-dist/server/index.js",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/dm-sans": "^5.3.0",
+    "compression": "^1.8.2",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "lucide-react": "^0.468.0",
@@ -22,17 +28,21 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.9",
+    "@playwright/test": "^1.64.0",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.5",
     "@types/pg": "^8.11.10",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
-    "@tailwindcss/vite": "^4.3.3",
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
+    "lighthouse": "^13.5.0",
     "tailwindcss": "^4.3.3",
-    "typescript": "~5.7.2",
     "tsx": "^4.19.2",
+    "typescript": "~5.7.2",
     "vite": "^6.0.7"
   }
 }
