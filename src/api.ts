@@ -560,6 +560,12 @@ export function getActivityLog() {
   return request<ActivityEvent[]>("/api/activity");
 }
 
+export function deleteActivityLogEvent(id: string) {
+  return request<{ success: boolean }>(`/api/activity/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
 // Legacy APIs
 export function getDailyProgressReports(reportDate: string) {
   return request<DailyProgressReport[]>(

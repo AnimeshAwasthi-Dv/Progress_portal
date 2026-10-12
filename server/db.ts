@@ -1,7 +1,6 @@
 import "dotenv/config";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { Pool } from "pg";
-import { seedProjectAllotments } from "./seedProjectAllotments.js";
 
 const databaseUrl = process.env.DATABASE_URL;
 
@@ -365,22 +364,6 @@ export async function initializeDatabase() {
       );
     }
 
-    // Keep development fixtures convenient, but never reset production credentials.
-    if (process.env.NODE_ENV !== "production") {
-      const seededEmails = [
-        "admin@taskmanager.internal",
-        "animesh@taskmanager.internal",
-        "vaibhav@taskmanager.internal",
-        "sakshi@taskmanager.internal",
-        "suraj@taskmanager.internal",
-      ];
-      for (const email of seededEmails) {
-        await client.query(
-          "UPDATE users SET password_hash = $1, password_reset_required = false WHERE lower(email) = lower($2)",
-          [hashPassword("@12345"), email],
-        );
-      }
-    }
 
     // Foreign keys for teams manager and lead
     await client.query(`
@@ -605,238 +588,29 @@ export async function initializeDatabase() {
         )
     `);
 
-    // Seed default teams and users if not exists
-    const isProduction = process.env.NODE_ENV === "production";
+    // Bootstrap only the administrator and a starter team on a fresh database.
     const usersCount = await client.query<{ count: string }>("SELECT COUNT(*) FROM users");
     if (Number(usersCount.rows[0].count) === 0) {
       const initialAdminPassword = process.env.INITIAL_ADMIN_PASSWORD;
-      if (
-        isProduction &&
-        (!initialAdminPassword || initialAdminPassword.length < 16 || !/[A-Za-z]/.test(initialAdminPassword) || !/\d/.test(initialAdminPassword))
-      ) {
-        throw new Error("Set INITIAL_ADMIN_PASSWORD to a unique password of at least 16 characters before initializing an empty production database.");
+      if (!initialAdminPassword || initialAdminPassword.length < 12) {
+        throw new Error("Set INITIAL_ADMIN_PASSWORD (at least 12 characters) before initializing an empty database.");
       }
 
-      // Create initial teams
-      const teamRes = await client.query(
+      const teamRes = await client.query<{ id: number; name: string }>(
         `INSERT INTO teams (name, description)
-         VALUES 
-          ('Engineering - Core Systems', 'Backend, Platform, DB & Cloud Infrastructure'),
-          ('AI & Imaging Systems', 'DICOM, AI models, remote processing'),
-          ('Product Applications', 'Web & Mobile Portals')
+         VALUES ('Technical', 'Technical department team'), ('Sales', 'Sales department team')
+         ON CONFLICT (name) DO UPDATE SET description = COALESCE(teams.description, EXCLUDED.description)
          RETURNING id, name`,
       );
-      const coreTeamId = teamRes.rows[0].id;
-      const aiTeamId = teamRes.rows[1].id;
-      const appTeamId = teamRes.rows[2].id;
-
-      // Production starts with a secure Admin account; development gets demo users.
-      const seedUsers = isProduction ? [
-        { name: "Admin", email: "admin@taskmanager.internal", role: "Admin", dept: "Executive", desig: "System Administrator", teamId: coreTeamId },
-      ] : [
-        { name: "Admin", email: "admin@taskmanager.internal", role: "Admin", dept: "Executive", desig: "System Administrator", teamId: coreTeamId },
-        { name: "Animesh", email: "animesh@taskmanager.internal", role: "Team Lead", dept: "Technical", desig: "Technical Lead", teamId: coreTeamId },
-        { name: "Vaibhav", email: "vaibhav@taskmanager.internal", role: "Individual", dept: "Technical", desig: "Technical Intern", teamId: aiTeamId },
-        { name: "Sakshi", email: "sakshi@taskmanager.internal", role: "Individual", dept: "Technical", desig: "Technical Intern", teamId: aiTeamId },
-        { name: "Suraj", email: "suraj@taskmanager.internal", role: "Individual", dept: "Technical", desig: "Technical Intern", teamId: aiTeamId },
-      ];
-
-      const insertedUsers: Record<string, number> = {};
-      for (const u of seedUsers) {
-        const seedPassword = isProduction ? initialAdminPassword! : "@12345";
-        const uRes = await client.query<{ id: number }>(
-          `INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
-           VALUES ($1, $7, $2, $8, false, $3, $4, $5, $6)
-           RETURNING id`,
-          [u.name, u.email, u.role, u.dept, u.desig, u.teamId, u.email.split("@")[0].toLowerCase(), hashPassword(seedPassword)],
-        );
-        insertedUsers[u.name] = uRes.rows[0].id;
-
-        // Also add to team_members
-        await client.query(
-          `INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-          [u.teamId, uRes.rows[0].id],
-        );
-
-        // Populate employees table if not present
-        await client.query(
-          `INSERT INTO employees (name, department, designation, current_work, status)
-           VALUES ($1, $2, $3, 'Active project tasks', 'In Progress')
-           ON CONFLICT DO NOTHING`,
-          [u.name, u.dept, u.desig],
-        );
-      }
-
-      if (isProduction) {
-        await client.query("UPDATE teams SET manager_id = $1, lead_id = NULL WHERE id = ANY($2::int[])", [
-          insertedUsers["Admin"],
-          [coreTeamId, aiTeamId, appTeamId],
-        ]);
-      } else {
-        // Update team leads and managers
-        await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
-          insertedUsers["Admin"],
-          insertedUsers["Animesh"],
-          coreTeamId,
-        ]);
-        await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
-          insertedUsers["Admin"],
-          insertedUsers["Animesh"],
-          aiTeamId,
-        ]);
-        await client.query(`UPDATE teams SET manager_id = $1, lead_id = $2 WHERE id = $3`, [
-          insertedUsers["Admin"],
-          insertedUsers["Rohit"],
-          appTeamId,
-        ]);
-      }
-
-      if (!isProduction) {
-      // Seed core Projects
-      const seedProjects = [
-        { name: "Analytics Portal [AI endpoint usage]", code: "ANA", mgr: "Admin", lead: "Animesh" },
-        { name: "Data Portal / Study Portal [NCG/COPD]", code: "DAT", mgr: "Admin", lead: "Animesh" },
-        { name: "Marengo portal Staging", code: "MAR", mgr: "Admin", lead: "Animesh" },
-        { name: "DICOM viewer Marengo", code: "DIC", mgr: "Admin", lead: "Animesh" },
-        { name: "Common PACS portal", code: "PAC", mgr: "Admin", lead: "Animesh" },
-        { name: "Technical Team Infrastructure", code: "INF", mgr: "Admin", lead: "Animesh" },
-        { name: "Enterprise Client Pipeline & Expansion", code: "SLS", mgr: "Admin", lead: "Rohit" },
-      ];
-
-      const insertedProjects: Record<string, number> = {};
-      for (const p of seedProjects) {
-        const pRes = await client.query<{ id: number }>(
-          `INSERT INTO projects (name, code, description, manager_id, lead_id, status, start_date, target_date)
-           VALUES ($1, $2, $3, $4, $5, 'Active', CURRENT_DATE - INTERVAL '14 days', CURRENT_DATE + INTERVAL '45 days')
-           RETURNING id`,
-          [
-            p.name,
-            p.code,
-            `Core organizational project for ${p.name}`,
-            insertedUsers[p.mgr] ?? insertedUsers["Admin"],
-            insertedUsers[p.lead] ?? insertedUsers["Animesh"],
-          ],
-        );
-        insertedProjects[p.name] = pRes.rows[0].id;
-
-        // Seed only explicit project owners; task assignments grant employee access separately.
-        for (const uId of new Set([insertedUsers[p.mgr], insertedUsers[p.lead]])) {
-          await client.query(
-            `INSERT INTO project_members (project_id, user_id, role_in_project)
-             VALUES ($1, $2, 'Contributor')
-             ON CONFLICT DO NOTHING`,
-            [pRes.rows[0].id, uId],
-          );
-        }
-      }
-
-      // Seed existing allotments into tasks table
-      let taskIndex = 1;
-      for (const allotment of seedProjectAllotments) {
-        const pId =
-          insertedProjects[allotment.project] ||
-          insertedProjects["Technical Team Infrastructure"] ||
-          Object.values(insertedProjects)[0];
-        const assignedToId = insertedUsers[allotment.employeeName] || insertedUsers["Animesh"];
-        const assignedById = insertedUsers["Animesh"] || insertedUsers["Admin"];
-        const reviewerId = allotment.employeeName === "Animesh" ? insertedUsers["Shivam"] : insertedUsers["Animesh"];
-        const code = `TSK-${String(taskIndex).padStart(3, "0")}`;
-
-        const isBlocked = taskIndex === 5;
-        const isInReview = taskIndex === 3;
-        const isCompleted = taskIndex === 1 || taskIndex === 8;
-        const status: TaskStatus = isBlocked
-          ? "Blocked"
-          : isInReview
-          ? "In Review"
-          : isCompleted
-          ? "Completed"
-          : "In Progress";
-
-        const tRes = await client.query<{ id: number }>(
-          `INSERT INTO tasks (
-            task_code, title, description, project_id, assigned_by_user_id, assigned_to_user_id,
-            reviewer_user_id, priority, status, start_date, due_date, estimated_hours, actual_hours,
-            progress_percent, acceptance_criteria, repository_url, blocker_reason, acknowledged_at,
-            completed_at, submitted_for_review_at
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_DATE - INTERVAL '7 days', CURRENT_DATE + INTERVAL '7 days', 16, 8, $10, $11, $12, $13, NOW(), $14, $15)
-           RETURNING id`,
-          [
-            code,
-            allotment.taskAssigned.slice(0, 80),
-            allotment.taskAssigned,
-            pId,
-            assignedById,
-            assignedToId,
-            reviewerId,
-            taskIndex % 3 === 0 ? "High" : taskIndex % 2 === 0 ? "Urgent" : "Medium",
-            status,
-            isCompleted ? 100 : isInReview ? 90 : isBlocked ? 40 : 50,
-            "1. Must be verified in staging.\n2. Code reviewed and merged.\n3. Documentation updated.",
-            "https://github.com/org/task-repo",
-            isBlocked ? "Awaiting staging cluster certificate renewal" : null,
-            isCompleted ? new Date() : null,
-            isInReview ? new Date() : null,
-          ],
-        );
-
-        const taskId = tRes.rows[0].id;
-
-        // Subtasks
-        await client.query(
-          `INSERT INTO subtasks (task_id, title, is_completed)
-           VALUES 
-            ($1, 'Requirements analysis & setup', true),
-            ($1, 'Implementation and unit tests', $2),
-            ($1, 'Staging deployment & QA verify', $3)`,
-          [taskId, isCompleted || isInReview, isCompleted],
-        );
-
-        // Activity log
-        await client.query(
-          `INSERT INTO task_activity_history (task_id, actor_user_id, action, new_value)
-           VALUES 
-            ($1, $2, 'TASK_CREATED', 'Task initialized and assigned'),
-            ($1, $3, 'STATUS_CHANGE', $4)`,
-          [taskId, assignedById, assignedToId, status],
-        );
-
-        // Comments
-        await client.query(
-          `INSERT INTO task_comments (task_id, user_id, comment)
-           VALUES ($1, $2, 'Initial progress made on architectural setup. Continuing with implementation.')`,
-          [taskId, assignedToId],
-        );
-
-        taskIndex++;
-      }
-
-      // Add default notifications
-      for (const u of Object.values(insertedUsers)) {
-        await client.query(
-          `INSERT INTO notifications (user_id, title, message, type, is_read)
-           VALUES 
-            ($1, 'Welcome to the Task & Workload Management Platform', 'Your role and workspace have been configured.', 'system', false),
-            ($1, 'Task Review Assigned', 'You have project deliverables scheduled for review this week.', 'task', false)`,
-          [u],
-        );
-      }
-      }
-    }
-
-    // Seed project_allotments if not exists
-    if (!isProduction) for (const allotment of seedProjectAllotments) {
-      await client.query(
-        `INSERT INTO project_allotments (serial_number, employee_name, project, task_assigned)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (serial_number, employee_name, project, task_assigned) DO NOTHING`,
-        [
-          allotment.serialNumber,
-          allotment.employeeName,
-          allotment.project,
-          allotment.taskAssigned,
-        ],
+      const technicalTeam = teamRes.rows.find((team) => team.name === "Technical");
+      const admin = await client.query<{ id: number }>(
+        `INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
+         VALUES ('Admin', 'admin', 'admin@taskmanager.internal', $1, true, 'Admin', 'Executive', 'System Administrator', $2)
+         RETURNING id`,
+        [hashPassword(initialAdminPassword), technicalTeam!.id],
       );
+      await client.query("UPDATE teams SET manager_id = $1 WHERE id = $2", [admin.rows[0].id, technicalTeam!.id]);
+      await client.query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2)", [technicalTeam!.id, admin.rows[0].id]);
     }
 
     await client.query("COMMIT");
@@ -2261,6 +2035,55 @@ export async function listOrganizationActivity(viewer: AccessUser) {
   ]
     .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
     .slice(0, 100);
+}
+
+export async function deleteOrganizationActivityEvent(
+  viewer: AccessUser,
+  eventType: "task" | "project" | "employee",
+  eventId: number,
+) {
+  if (!Number.isSafeInteger(eventId) || eventId < 1 || (viewer.role !== "Admin" && viewer.role !== "Team Lead")) {
+    return false;
+  }
+
+  if (eventType === "task") {
+    const scope = taskVisibilityClause(viewer, "t", "p", 2);
+    const result = await pool.query(`
+      DELETE FROM task_activity_history tah
+      USING tasks t, projects p
+      WHERE tah.id = $1 AND t.id = tah.task_id AND p.id = t.project_id
+        AND ${scope.sql}
+    `, [eventId, ...scope.values]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  if (eventType === "project") {
+    const scope = projectVisibilityClause(viewer, "p", 2);
+    const result = await pool.query(`
+      DELETE FROM project_activity_history pah
+      USING projects p
+      WHERE pah.id = $1 AND p.id = pah.project_id
+        AND ${scope.sql}
+    `, [eventId, ...scope.values]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  const result = viewer.role === "Admin"
+    ? await pool.query("DELETE FROM user_audit_history WHERE id = $1", [eventId])
+    : await pool.query(`
+        DELETE FROM user_audit_history uah
+        USING users target_user
+        WHERE uah.id = $1 AND target_user.id = uah.target_user_id
+          AND (uah.actor_user_id = $2 OR EXISTS (
+            SELECT 1 FROM teams managed_team
+            WHERE (managed_team.manager_id = $2 OR managed_team.lead_id = $2)
+              AND (target_user.team_id = managed_team.id OR EXISTS (
+                SELECT 1 FROM team_members tm
+                WHERE tm.team_id = managed_team.id AND tm.user_id = target_user.id
+              ))
+          ))
+      `, [eventId, viewer.id]);
+  return (result.rowCount ?? 0) > 0;
 }
 
 // ----------------- Legacy Project Allotments & Employees Functions ----------------- //

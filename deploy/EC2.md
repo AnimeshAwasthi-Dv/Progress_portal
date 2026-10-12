@@ -40,7 +40,7 @@ DATABASE_URL=postgresql://DB_USER:URL_ENCODED_PASSWORD@RDS_ENDPOINT:5432/task?ss
 INITIAL_ADMIN_PASSWORD=USE_A_UNIQUE_RANDOM_VALUE_AT_LEAST_16_CHARACTERS_LONG
 ```
 
-`INITIAL_ADMIN_PASSWORD` is used only when production initializes an empty database. It creates only the Admin profile and default teams; the development users, projects, tasks, and allotments are not seeded. Keep the value private and remove it from the environment file after the first successful initialization. Existing databases retain their current credentials.
+`INITIAL_ADMIN_PASSWORD` is used only when an empty database is initialized. It creates only the Admin profile and the Sales and Technical teams; employee profiles, projects, tasks, and allotments are added manually. Keep the value private and remove it from the environment file after the first successful initialization. Existing databases retain their current credentials.
 
 If deploying a database previously used for development, change every seeded account password before allowing public access. Earlier versions reset those accounts to the shared development password `@12345` on startup; this build no longer changes production passwords during startup.
 

@@ -48,6 +48,7 @@ import {
   getTeamWorkloadAnalytics,
   getDashboardMetrics,
   listOrganizationActivity,
+  deleteOrganizationActivityEvent,
   canAccessProject,
   canAssignUserToProject,
   deactivateUser,
@@ -885,6 +886,26 @@ app.get(
   requireRole(["Admin", "Manager", "Team Lead"]),
   asyncRoute(async (req, res) => {
     res.json(await listOrganizationActivity(req.currentUser!));
+  }),
+);
+
+app.delete(
+  "/api/activity/:id",
+  authMiddleware,
+  requireRole(["Admin", "Team Lead"]),
+  asyncRoute(async (req, res) => {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const match = /^(task|project|employee)-([1-9]\d*)$/.exec(rawId);
+    if (!match) {
+      res.status(400).json({ error: "Valid activity log ID required." });
+      return;
+    }
+    const deleted = await deleteOrganizationActivityEvent(req.currentUser!, match[1] as "task" | "project" | "employee", Number(match[2]));
+    if (!deleted) {
+      res.status(404).json({ error: "Activity log entry not found in your authorized scope." });
+      return;
+    }
+    res.json({ success: true });
   }),
 );
 

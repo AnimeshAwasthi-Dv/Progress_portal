@@ -33,6 +33,7 @@ import {
   ShieldAlert,
   Sparkles,
   TrendingUp,
+  Trash2,
   User,
   UserPlus,
   Users,
@@ -47,6 +48,7 @@ import {
   createTask,
   createUser,
   deactivateEmployee,
+  deleteActivityLogEvent,
   changePassword,
   getCurrentUser,
   getActivityLog,
@@ -761,23 +763,26 @@ export default function App() {
     return usersList.filter((u) => u.role === "Admin");
   }, [usersList]);
   const departmentGroups = useMemo(() => {
-    const groups = new Map<string, AppUser[]>();
-    usersList.forEach((user) => {
-      const name = user.department?.trim() || "Unassigned";
-      const key = name.toLocaleLowerCase();
-      const existing = groups.get(key);
-      if (existing) existing.push(user);
-      else groups.set(key, [user]);
-    });
-    return Array.from(groups.values()).map((members) => ({
-      name: members[0].department?.trim() || "Unassigned",
-      members,
-    })).sort((left, right) => left.name.localeCompare(right.name));
+    return ["Sales", "Technical"].map((name) => ({
+      name,
+      members: usersList.filter((user) => user.department?.trim().toLocaleLowerCase() === name.toLocaleLowerCase()),
+    }));
   }, [usersList]);
   const activeDepartment = departmentGroups.find((department) => department.name === selectedDepartment) || null;
   const employeePageSize = 9;
   const employeePageCount = Math.max(1, Math.ceil(individualContributors.length / employeePageSize));
   const employeePageUsers = individualContributors.slice(employeePage * employeePageSize, (employeePage + 1) * employeePageSize);
+
+  const handleDeleteActivityEvent = async (event: ActivityEvent) => {
+    if (role !== "Admin" && role !== "Team Lead") return;
+    if (!window.confirm("Remove this activity log entry? This cannot be undone.")) return;
+    try {
+      await deleteActivityLogEvent(event.id);
+      setActivityEvents((current) => current.filter((item) => item.id !== event.id));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not remove the activity log entry.");
+    }
+  };
 
   const deactivationActiveTaskCount = deactivationTarget
     ? tasksList.filter((task) => task.assignedToUserId === deactivationTarget.id && task.status !== "Completed").length
@@ -2715,7 +2720,7 @@ export default function App() {
                       <table className="min-w-[760px] w-full text-left border-collapse text-xs sm:text-sm">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[11px]">
-                            <th className="p-3">Time</th><th className="p-3">Actor</th><th className="p-3">Type</th><th className="p-3">Event</th><th className="p-3">Record</th><th className="p-3">Details</th>
+                            <th className="p-3">Time</th><th className="p-3">Actor</th><th className="p-3">Type</th><th className="p-3">Event</th><th className="p-3">Record</th><th className="p-3">Details</th>{(role === "Admin" || role === "Team Lead") && <th className="p-3">Actions</th>}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -2727,6 +2732,20 @@ export default function App() {
                               <td className="p-3 font-semibold text-slate-800">{event.action.split("_").join(" ")}</td>
                               <td className="p-3">{event.entityName}</td>
                               <td className="p-3 text-slate-600">{event.details}</td>
+                              {(role === "Admin" || role === "Team Lead") && (
+                                <td className="p-3">
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleDeleteActivityEvent(event)}
+                                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-rose-600 hover:bg-rose-50"
+                                    aria-label={`Remove ${event.action.split("_").join(" ")} activity`}
+                                    title="Remove activity log entry"
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                    <span>Remove</span>
+                                  </button>
+                                </td>
+                              )}
                             </tr>
                           ))}
                         </tbody>
@@ -3658,13 +3677,15 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Department *</label>
-                  <input
-                    type="text"
+                  <select
                     required
                     value={userFormData.department}
                     onChange={(e) => setUserFormData({ ...userFormData, department: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-lg"
-                  />
+                    className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white"
+                  >
+                    <option value="Sales">Sales</option>
+                    <option value="Technical">Technical</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Team *</label>
