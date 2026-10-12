@@ -93,7 +93,6 @@ import {
   type User as AppUser,
   type UserRole,
   type WorkloadMember,
-  type WorkspaceData,
   updateTask,
 } from "./api";
 
@@ -165,7 +164,7 @@ type ViewMode =
   | "allotments"
   | "workflows";
 
-export default function App({ initialUser, initialData }: { initialUser: AppUser; initialData?: WorkspaceData }) {
+export default function App({ initialUser }: { initialUser: AppUser }) {
   // Application State
   const [currentUser, setCurrentUser] = useState<AppUser | null>(initialUser);
   const [usersList, setUsersList] = useState<AppUser[]>([]);
@@ -298,7 +297,7 @@ export default function App({ initialUser, initialData }: { initialUser: AppUser
   });
 
   // Initial Data Fetch
-  const refreshAllData = async (knownUser?: AppUser, prefetched?: WorkspaceData) => {
+  const refreshAllData = async (knownUser?: AppUser) => {
     const generation = ++dataRefreshGeneration.current;
     try {
       const u = knownUser ?? await getCurrentUser();
@@ -308,10 +307,11 @@ export default function App({ initialUser, initialData }: { initialUser: AppUser
       // independent sections can fill in as their own authorized requests finish.
       setIsLoading(false);
 
+      const sectionUpdates: Array<() => void> = [];
       const loadSection = async <T,>(promise: Promise<T>, apply: (data: T) => void) => {
         try {
           const data = await promise;
-          if (generation === dataRefreshGeneration.current) apply(data);
+          sectionUpdates.push(() => apply(data));
         } catch (err: any) {
           if (generation === dataRefreshGeneration.current) {
             if (err.message?.includes("sign in") || err.message?.includes("session has expired")) {
@@ -326,17 +326,20 @@ export default function App({ initialUser, initialData }: { initialUser: AppUser
       };
 
       await Promise.all([
-        loadSection(prefetched?.users ?? getUsers(), setUsersList),
-        loadSection(prefetched?.teams ?? getTeams(), setTeamsList),
-        loadSection(prefetched?.projects ?? getProjects(), setProjectsList),
-        loadSection(prefetched?.tasks ?? getTasks(), setTasksList),
-        loadSection(prefetched?.metrics ?? getDashboardMetrics(), setMetrics),
+        loadSection(getUsers(), setUsersList),
+        loadSection(getTeams(), setTeamsList),
+        loadSection(getProjects(), setProjectsList),
+        loadSection(getTasks(), setTasksList),
+        loadSection(getDashboardMetrics(), setMetrics),
         ...(currentView === "workload" || currentView === "analytics"
           ? [loadSection(getTeamWorkloadAnalytics(), setWorkloadData)] : []),
-        loadSection(prefetched?.notifications ?? getNotifications(), setNotifications),
+        loadSection(getNotifications(), setNotifications),
         ...(u.role === "Admin" && currentView === "allotments"
           ? [loadSection(getProjectAllotments(), setAllotments)] : []),
       ]);
+      // React batches these updates into one commit, avoiding a layout pass for
+      // each independent network response. Never apply a previous session's data.
+      if (generation === dataRefreshGeneration.current) sectionUpdates.forEach((apply) => apply());
     } catch (err: any) {
       if (generation !== dataRefreshGeneration.current) return;
       if (err.message?.includes("sign in") || err.message?.includes("session has expired")) {
@@ -351,7 +354,7 @@ export default function App({ initialUser, initialData }: { initialUser: AppUser
   };
 
   useEffect(() => {
-    refreshAllData(initialUser, initialData);
+    refreshAllData(initialUser);
   }, []);
 
   useEffect(() => {

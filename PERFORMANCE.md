@@ -1,5 +1,15 @@
 # Performance changes and verification
 
+## Correction after the 69-point production report (October 13, 2026)
+
+The subsequent desktop report scored 69 performance with 360 ms TBT, while accessibility, best practices and SEO were 100. Earlier local 100-point results used synthetic data and a compressed localhost server; they did not establish a production score.
+
+The supplied live Nginx configuration and `npm run perf:check-live` confirm HTTP/1.1, no JavaScript compression or immutable cache headers, and missing assets falling through to HTML. The exact Certbot-compatible configuration and a backup/validation installer are in `deploy/`; see `deploy/EC2.md`.
+
+The previous speculative data loading has been removed: six API requests could compete with the still-pending workspace chunk on HTTP/1.1. A browser regression check now holds that chunk and asserts that no dashboard API requests start until it is available. Initial section updates are batched after those requests settle, reducing repeated dashboard renders. Card hover no longer animates box-shadow. One Latin variable font (36.9 KB) replaces four font-weight downloads (57 KB); extended Latin downloads only if needed.
+
+The connection-contention contribution is a hypothesis supported by the request ordering, not a quantified explanation for all 360 ms of blocking time. The PDF also records substantially more layout work. Production must be re-audited under the same throttling and authentication conditions after deployment; no new production score is claimed.
+
 ## Follow-up to the deployed Lighthouse PDF (October 13, 2026)
 
 The supplied report audited the authenticated desktop dashboard: 96 performance, 94 accessibility, 100 best practices and 92 SEO. Its robots failure came from the SPA HTML being returned for `/robots.txt`. Read-only checks also confirmed the deployed JavaScript had no cache or compression headers.
@@ -9,7 +19,7 @@ Changes for this report:
 - Added `public/robots.txt` and an exact Nginx location so crawler requests cannot fall through to HTML.
 - Increased contrast for sign-out, New Assignment, sidebar headings, empty states and secondary dashboard text.
 - Generate 48/96/192px WebP logo variants during build/dev startup and select them with `srcset`, with explicit image dimensions. Files are 512/1,176/2,494 bytes versus the original 11,440-byte PNG.
-- Start the initial authorized data requests in parallel with downloading the workspace chunk, then reuse those promises instead of fetching twice.
+- Initially started data requests alongside the workspace chunk; this was subsequently reverted because it can contend for HTTP/1.1 connections (see correction above).
 - Added an HTTPS Nginx template for the actual domain with HTTP/2, static asset caching and both JavaScript compression MIME types. Apply it to the active HTTPS virtual host as described in `deploy/EC2.md`; changing the repository alone does not update the live server.
 - Added an authenticated dashboard accessibility regression check and robots/image/cache response tests.
 

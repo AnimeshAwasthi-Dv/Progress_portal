@@ -2,10 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import Entry from "./Entry";
 import "./index.css";
-import "@fontsource/dm-sans/latin-400.css";
-import "@fontsource/dm-sans/latin-500.css";
-import "@fontsource/dm-sans/latin-600.css";
-import "@fontsource/dm-sans/latin-700.css";
+import "@fontsource-variable/dm-sans/wght.css";
 
 const root = document.getElementById("root")!;
 const application = (

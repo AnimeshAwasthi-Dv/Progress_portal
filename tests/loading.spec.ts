@@ -40,6 +40,14 @@ test("login errors remain visible and allow retry", async ({ page }) => {
 test("authenticated startup defers unrelated data and avoids another identity request", async ({ page }) => {
   await page.setViewportSize({ width: 1365, height: 1000 });
   const paths: string[] = [];
+  let releaseWorkspace!: () => void;
+  const workspaceReady = new Promise<void>((resolve) => { releaseWorkspace = resolve; });
+  let workspaceRequested = false;
+  await page.route("**/assets/App-*.js", async (route) => {
+    workspaceRequested = true;
+    await workspaceReady;
+    await route.continue();
+  });
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
     paths.push(path);
@@ -55,7 +63,12 @@ test("authenticated startup defers unrelated data and avoids another identity re
   });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect.poll(() => workspaceRequested).toBe(true);
+  // Six early API fetches must not occupy all HTTP/1.1 connections while
+  // the JavaScript required to display the authenticated page is waiting.
+  expect(paths).toEqual(["/api/auth/session"]);
+  releaseWorkspace();
   await expect(page.getByRole("heading", { name: "Welcome back" })).toHaveCount(0);
   await expect.poll(() => paths.includes("/api/tasks")).toBe(true);
   expect(paths.filter((path) => path === "/api/auth/session")).toHaveLength(1);
@@ -69,6 +82,10 @@ test("authenticated startup defers unrelated data and avoids another identity re
   }
   const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
   expect(accessibility.violations).toEqual([]);
+  const card = page.locator("button.card-hover").first();
+  if (await card.count()) {
+    expect(await card.evaluate((element) => getComputedStyle(element).transitionProperty)).toBe("transform");
+  }
 });
 
 test("crawler and asset responses have correct content types and cache headers", async ({ request, page }) => {

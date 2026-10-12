@@ -366,19 +366,6 @@ export function getSessionUser() {
   return request<User | null>("/api/auth/session");
 }
 
-export function loadWorkspaceData() {
-  const data = {
-    users: getUsers(), teams: getTeams(), projects: getProjects(), tasks: getTasks(),
-    metrics: getDashboardMetrics(), notifications: getNotifications(),
-  };
-  // Start requests alongside the workspace import. App consumes the same promises
-  // and displays any errors, even if a request finishes before the chunk loads.
-  for (const pending of Object.values(data)) void pending.catch(() => undefined);
-  return data;
-}
-
-export type WorkspaceData = ReturnType<typeof loadWorkspaceData>;
-
 export function getUsers() {
   return request<User[]>("/api/users");
 }

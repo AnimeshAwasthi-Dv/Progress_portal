@@ -69,6 +69,16 @@ Confirm `http://127.0.0.1:3001/api/health` returns `{"status":"ok",...}` on the 
 
 ### Existing HTTPS deployment (Lighthouse report fixes)
 
+For the supplied `/etc/nginx/sites-enabled/task-manager` Certbot configuration, after syncing this checkout to the server, run:
+
+```bash
+cd /opt/task-manager
+sudo bash deploy/apply-nginx-performance.sh
+npm run perf:check-live
+```
+
+The installer resolves the existing site symlink, saves its original contents outside `sites-enabled`, preserves the Certbot TLS include/DH parameters, tests Nginx, and reloads it. If installation, validation or reload fails, it restores the original configuration. The delivery check makes public read-only requests and exits nonzero if HTTP/2, bundle gzip, immutable caching, plain-text robots or missing-asset 404 handling are absent. It does not require restarting the API.
+
 Use `deploy/nginx.https.conf.example` as the production site definition for `task.admindectrocel.online`. Preserve the installed certificate paths and set `root` to the actual deployed `dist` directory. Replace the existing matching site definition; do not create a second site with the same hostname. Apply the cache and gzip directives to the **443 server block** that serves the application, not only the port 80 redirect block.
 
 The template uses `http2 on` for Nginx 1.25.1 and later (the audited server reports 1.28.3). For an older installation, use `listen 443 ssl http2` and `listen [::]:443 ssl http2` instead, and omit `http2 on`. See the [official HTTP/2 documentation](https://nginx.org/en/docs/http/ngx_http_v2_module.html).
