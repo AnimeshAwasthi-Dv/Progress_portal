@@ -1416,6 +1416,35 @@ export async function getTaskById(id: number, viewer?: AccessUser) {
   return task;
 }
 
+export async function deleteTaskForUser(id: number, viewer: AccessUser) {
+  if (!Number.isSafeInteger(id) || id < 1) return false;
+
+  if (viewer.role === "Admin") {
+    const result = await pool.query("DELETE FROM tasks WHERE id = $1", [id]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  if (viewer.role === "Individual") {
+    const result = await pool.query(
+      "DELETE FROM tasks WHERE id = $1 AND assigned_to_user_id = $2",
+      [id, viewer.id],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  if (viewer.role === "Team Lead") {
+    const scope = projectVisibilityClause(viewer, "p", 2);
+    const result = await pool.query(`
+      DELETE FROM tasks t
+      USING projects p
+      WHERE t.id = $1 AND p.id = t.project_id AND ${scope.sql}
+    `, [id, ...scope.values]);
+    return (result.rowCount ?? 0) > 0;
+  }
+
+  return false;
+}
+
 export async function createTask(input: {
   title: string;
   description?: string;

@@ -49,6 +49,7 @@ import {
   createUser,
   deactivateEmployee,
   deleteActivityLogEvent,
+  deleteTask,
   changePassword,
   getCurrentUser,
   getActivityLog,
@@ -741,6 +742,19 @@ export default function App() {
   const canManageUsers = role === "Admin" || role === "Team Lead";
   const canManageEmployees = role === "Admin" || role === "Manager" || role === "Team Lead";
   const canAssignTasks = role === "Admin" || role === "Manager" || role === "Team Lead";
+  const canRemoveTask = (task: Task) => role === "Admin" || role === "Team Lead" || (role === "Individual" && task.assignedToUserId === currentUser?.id);
+
+  const handleDeleteTask = async (task: Task) => {
+    if (!canRemoveTask(task) || !window.confirm(`Remove task ${task.taskCode}? This will permanently delete its task history and comments.`)) return;
+    try {
+      await deleteTask(task.id);
+      setTasksList((current) => current.filter((item) => item.id !== task.id));
+      if (selectedTaskId === task.id) setSelectedTaskId(null);
+      await refreshAllData();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not remove the task.");
+    }
+  };
 
   // Grouped Team Hierarchy for Team Management Module
   const teamLeadsManagers = useMemo(() => {
@@ -1888,15 +1902,33 @@ export default function App() {
                                 </td>
                                 <td className="py-3.5 px-4 text-slate-700 font-semibold">{t.dueDate || "N/A"}</td>
                                 <td className="py-3.5 px-4 text-right">
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setSelectedTaskId(t.id);
-                                    }}
-                                    className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
-                                  >
-                                    <Eye className="w-4 h-4" />
-                                  </button>
+                                  <div className="flex items-center justify-end gap-1">
+                                    <button
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setSelectedTaskId(t.id);
+                                      }}
+                                      className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
+                                      aria-label={`View task ${t.taskCode}`}
+                                      title="View task"
+                                    >
+                                      <Eye className="w-4 h-4" />
+                                    </button>
+                                    {canRemoveTask(t) && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          void handleDeleteTask(t);
+                                        }}
+                                        className="p-1.5 text-rose-500 hover:text-rose-700 hover:bg-rose-50 rounded-lg transition"
+                                        aria-label={`Remove task ${t.taskCode}`}
+                                        title="Remove task"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    )}
+                                  </div>
                                 </td>
                               </tr>
                             ))
@@ -2948,12 +2980,23 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                   {selectedTask.priority}
                 </span>
               </div>
-              <button
-                onClick={() => setSelectedTaskId(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {canRemoveTask(selectedTask) && (
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteTask(selectedTask)}
+                    className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-bold text-rose-600 hover:bg-rose-50"
+                  >
+                    <Trash2 className="h-4 w-4" /> Remove task
+                  </button>
+                )}
+                <button
+                  onClick={() => setSelectedTaskId(null)}
+                  className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             {/* Body */}

@@ -434,6 +434,10 @@ export function getTaskById(id: number) {
   return request<Task>(`/api/tasks/${id}`);
 }
 
+export function deleteTask(id: number) {
+  return request<{ success: boolean }>(`/api/tasks/${id}`, { method: "DELETE" });
+}
+
 export function createTask(taskData: {
   title: string;
   description?: string;

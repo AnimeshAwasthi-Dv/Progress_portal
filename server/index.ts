@@ -33,6 +33,7 @@ import {
   getTaskById,
   getTaskIdForSubtask,
   createTask,
+  deleteTaskForUser,
   updateTaskDetails,
   acknowledgeTask,
   submitTaskReview,
@@ -526,6 +527,25 @@ app.get(
       return;
     }
     res.json(task);
+  }),
+);
+
+app.delete(
+  "/api/tasks/:id",
+  authMiddleware,
+  asyncRoute(async (req, res) => {
+    const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const id = Number(rawId);
+    if (!Number.isSafeInteger(id) || id < 1) {
+      res.status(400).json({ error: "Valid Task ID required." });
+      return;
+    }
+    const deleted = await deleteTaskForUser(id, req.currentUser!);
+    if (!deleted) {
+      res.status(404).json({ error: "Task not found or you are not allowed to remove it." });
+      return;
+    }
+    res.json({ success: true });
   }),
 );
 
