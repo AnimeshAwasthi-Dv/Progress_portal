@@ -71,6 +71,39 @@ body {
   min-height: 100dvh;
 }
 
+main,
+main > div,
+main section,
+main article,
+main .grid > *,
+main .flex > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+main :is(h1, h2, h3, p, td, th, label, a) {
+  overflow-wrap: anywhere;
+}
+
+main pre,
+main table {
+  max-width: 100%;
+}
+
+main pre {
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.app-safe-top {
+  padding-top: max(0.5rem, env(safe-area-inset-top));
+}
+
+.app-safe-bottom {
+  padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
 /* Keep long forms and dialogs usable on short screens and at high zoom. */
 [class~="fixed"][class~="inset-0"][class~="z-50"][class*="bg-slate-900/50"] {
   overflow-y: auto;

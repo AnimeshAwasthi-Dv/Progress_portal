@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -10,6 +10,8 @@ import {
   Calendar as CalendarIcon,
   Check,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Clock,
   Eye,
   FileCheck,
@@ -28,7 +30,6 @@ import {
   RefreshCw,
   Search,
   Send,
-  Settings,
   Shield,
   ShieldAlert,
   Sparkles,
@@ -116,6 +117,16 @@ function localDateString(date = new Date()) {
   return `${year}-${month}-${day}`;
 }
 
+function shiftDate(date: Date, days: number) {
+  const result = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function startOfWeek(date: Date) {
+  return shiftDate(date, -date.getDay());
+}
+
 const statusBadgeStyles: Record<TaskStatus, { bg: string; text: string; dot: string }> = {
   Backlog: { bg: "bg-slate-100", text: "text-slate-700", dot: "bg-slate-400" },
   "To Do": { bg: "bg-amber-50", text: "text-amber-800", dot: "bg-amber-500" },
@@ -151,8 +162,7 @@ type ViewMode =
   | "analytics"
   | "activity"
   | "allotments"
-  | "workflows"
-  | "settings";
+  | "workflows";
 
 export default function App() {
   // Application State
@@ -172,6 +182,7 @@ export default function App() {
   const [currentView, setCurrentView] = useState<ViewMode>("overview");
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const dataRefreshGeneration = useRef(0);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -198,6 +209,12 @@ export default function App() {
   const [employeePage, setEmployeePage] = useState(0);
   const [selectedDepartment, setSelectedDepartment] = useState<string | null>(null);
   const [reportDate, setReportDate] = useState<string>(localDateString());
+  const [calendarDate, setCalendarDate] = useState(() => new Date());
+  const [calendarMode, setCalendarMode] = useState<"Month" | "Week" | "Day">("Month");
+  const [calendarProjectFilter, setCalendarProjectFilter] = useState("All");
+  const [calendarEmployeeFilter, setCalendarEmployeeFilter] = useState("All");
+  const [calendarStatusFilter, setCalendarStatusFilter] = useState("All");
+  const [calendarPriorityFilter, setCalendarPriorityFilter] = useState("All");
 
   // Task Detail Modal / Side Panel
   const [selectedTaskId, setSelectedTaskId] = useState<number | null>(null);
@@ -284,31 +301,47 @@ export default function App() {
 
   // Initial Data Fetch
   const refreshAllData = async () => {
+    const generation = ++dataRefreshGeneration.current;
     try {
-      setIsLoading(true);
       const u = await getCurrentUser();
+      if (generation !== dataRefreshGeneration.current) return;
       setCurrentUser(u);
-      const [users, teams, projs, tasks, metricsData, workload, notifs, legacyAllotments] =
-        await Promise.all([
-          getUsers(),
-          getTeams(),
-          getProjects(),
-          getTasks(),
-          getDashboardMetrics(),
-          getTeamWorkloadAnalytics(),
-          getNotifications(),
-          u.role === "Admin" ? getProjectAllotments() : Promise.resolve([] as ProjectAllotment[]),
-        ]);
+      // Show the authenticated workspace as soon as identity is known. Its
+      // independent sections can fill in as their own authorized requests finish.
+      setIsLoading(false);
 
-      setUsersList(users);
-      setTeamsList(teams);
-      setProjectsList(projs);
-      setTasksList(tasks);
-      setMetrics(metricsData);
-      setWorkloadData(workload);
-      setNotifications(notifs);
-      setAllotments(legacyAllotments);
+      const loadSection = async <T,>(promise: Promise<T>, apply: (data: T) => void) => {
+        try {
+          const data = await promise;
+          if (generation === dataRefreshGeneration.current) apply(data);
+        } catch (err: any) {
+          if (generation === dataRefreshGeneration.current) {
+            if (err.message?.includes("sign in") || err.message?.includes("session has expired")) {
+              dataRefreshGeneration.current += 1;
+              setCurrentUser(null);
+              setErrorMessage("");
+            } else {
+              setErrorMessage((message) => message || err.message || "Failed to load application data.");
+            }
+          }
+        }
+      };
+
+      await Promise.all([
+        loadSection(getUsers(), setUsersList),
+        loadSection(getTeams(), setTeamsList),
+        loadSection(getProjects(), setProjectsList),
+        loadSection(getTasks(), setTasksList),
+        loadSection(getDashboardMetrics(), setMetrics),
+        loadSection(getTeamWorkloadAnalytics(), setWorkloadData),
+        loadSection(getNotifications(), setNotifications),
+        loadSection(
+          u.role === "Admin" ? getProjectAllotments() : Promise.resolve([] as ProjectAllotment[]),
+          setAllotments,
+        ),
+      ]);
     } catch (err: any) {
+      if (generation !== dataRefreshGeneration.current) return;
       if (err.message?.includes("sign in") || err.message?.includes("session has expired")) {
         setCurrentUser(null);
         setErrorMessage("");
@@ -316,13 +349,22 @@ export default function App() {
         setErrorMessage(err.message || "Failed to load application data.");
       }
     } finally {
-      setIsLoading(false);
+      if (generation === dataRefreshGeneration.current) setIsLoading(false);
     }
   };
 
   useEffect(() => {
     refreshAllData();
   }, []);
+
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setIsMobileMenuOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [isMobileMenuOpen]);
 
   // Fetch daily reports when reportDate changes
   useEffect(() => {
@@ -391,6 +433,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    dataRefreshGeneration.current += 1;
     try {
       await logout();
     } finally {
@@ -438,6 +481,52 @@ export default function App() {
       return true;
     });
   }, [tasksList, currentView, currentUser, filterProject, filterStatus, filterPriority, filterAssignee, filterDue, searchQuery]);
+
+  const calendarTasks = useMemo(() => tasksList
+    .filter((task) => task.dueDate)
+    .filter((task) => calendarProjectFilter === "All" || String(task.projectId) === calendarProjectFilter)
+    .filter((task) => calendarEmployeeFilter === "All" || String(task.assignedToUserId) === calendarEmployeeFilter)
+    .filter((task) => calendarStatusFilter === "All" || task.status === calendarStatusFilter)
+    .filter((task) => calendarPriorityFilter === "All" || task.priority === calendarPriorityFilter)
+    .sort((left, right) => (left.dueDate || "").localeCompare(right.dueDate || "")),
+  [tasksList, calendarProjectFilter, calendarEmployeeFilter, calendarStatusFilter, calendarPriorityFilter]);
+  const calendarTasksByDate = useMemo(() => {
+    const events = new Map<string, Task[]>();
+    calendarTasks.forEach((task) => {
+      if (!task.dueDate) return;
+      const dayTasks = events.get(task.dueDate) || [];
+      dayTasks.push(task);
+      events.set(task.dueDate, dayTasks);
+    });
+    return events;
+  }, [calendarTasks]);
+
+  const calendarPeriodStart = calendarMode === "Month"
+    ? startOfWeek(new Date(calendarDate.getFullYear(), calendarDate.getMonth(), 1))
+    : calendarMode === "Week" ? startOfWeek(calendarDate) : new Date(calendarDate.getFullYear(), calendarDate.getMonth(), calendarDate.getDate());
+  const calendarDayCount = calendarMode === "Month" ? 42 : calendarMode === "Week" ? 7 : 1;
+  const calendarDays = Array.from({ length: calendarDayCount }, (_, index) => shiftDate(calendarPeriodStart, index));
+  const calendarPeriodEndKey = localDateString(calendarDays[calendarDays.length - 1]);
+  const calendarVisibleTasks = calendarTasks.filter((task) => task.dueDate! >= localDateString(calendarPeriodStart) && task.dueDate! <= calendarPeriodEndKey);
+  const calendarHeading = calendarMode === "Day"
+    ? calendarDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })
+    : calendarMode === "Week"
+      ? `${calendarPeriodStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${shiftDate(calendarPeriodStart, 6).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
+      : calendarDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  const calendarTaskTone = (task: Task) => {
+    if (task.status === "Completed") return "border-emerald-200 bg-emerald-50 text-emerald-900";
+    if (task.status === "Blocked") return "border-rose-200 bg-rose-50 text-rose-900";
+    if (task.dueDate && task.dueDate < localDateString()) return "border-red-200 bg-red-50 text-red-900";
+    return "border-indigo-200 bg-indigo-50 text-indigo-900";
+  };
+
+  const moveCalendar = (direction: number) => {
+    setCalendarDate((current) => {
+      if (calendarMode === "Month") return new Date(current.getFullYear(), current.getMonth() + direction, 1);
+      return shiftDate(current, direction * (calendarMode === "Week" ? 7 : 1));
+    });
+  };
 
   // Action Handlers
   const handleOpenCreateTask = () => {
@@ -998,27 +1087,30 @@ export default function App() {
   return (
     <div className="h-[100dvh] min-h-[100dvh] overflow-hidden bg-slate-50 text-slate-900 font-sans flex flex-col">
       {/* Top Navigation Bar in Green & White Theme */}
-      <header className="sticky top-0 z-30 bg-white border-b border-indigo-100 px-4 lg:px-8 py-3 flex items-center justify-between shadow-sm lg:ml-64">
-        <div className="flex items-center gap-4">
+      <header className="app-safe-top sticky top-0 z-30 flex items-center justify-between gap-2 border-b border-indigo-100 bg-white px-2 py-2 shadow-sm sm:px-4 sm:py-3 lg:ml-64 lg:px-8">
+        <div className="flex shrink-0 items-center gap-2 sm:gap-4">
           <button
             onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
             className="p-2 text-slate-600 hover:bg-indigo-50 rounded-lg lg:hidden"
             aria-label="Toggle Navigation"
+            aria-expanded={isMobileMenuOpen}
+            aria-controls="workspace-navigation"
           >
             <Menu className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 sm:gap-3">
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-1 sm:gap-3">
           {/* Active User chip */}
-          <div className="flex min-w-0 max-w-full items-center bg-indigo-50 border border-indigo-200 rounded-lg px-2 sm:px-3 py-1.5 text-xs gap-2">
+          <div className="flex min-w-0 max-w-[calc(100vw-8rem)] items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-1.5 py-1.5 text-xs sm:max-w-full sm:gap-2 sm:px-3">
             <div className="w-6 h-6 rounded-full bg-indigo-200 text-indigo-800 font-bold flex items-center justify-center text-[10px]">
               {initials(currentUser?.name)}
             </div>
-            <span className="min-w-0 max-w-28 truncate text-indigo-900 font-bold sm:max-w-none">{currentUser?.name} – {currentUser?.role}</span>
-            <button onClick={handleLogout} className="ml-1 flex items-center gap-1 text-rose-600 font-bold hover:text-rose-800 transition">
+            <span className="min-w-0 max-w-[4.5rem] truncate font-bold text-indigo-900 sm:max-w-40">{currentUser?.name}</span>
+            <span className="hidden shrink-0 text-indigo-700 sm:inline">{currentUser?.role}</span>
+            <button onClick={handleLogout} className="ml-0.5 flex shrink-0 items-center gap-1 text-rose-600 font-bold hover:text-rose-800 transition" aria-label="Sign out">
               <Shield className="w-3 h-3" />
-              Sign out
+              <span className="hidden sm:inline">Sign out</span>
             </button>
           </div>
 
@@ -1026,7 +1118,7 @@ export default function App() {
           <div className="relative">
             <button
               onClick={() => setNotificationsOpen(!notificationsOpen)}
-              className="relative p-2 text-slate-600 hover:bg-indigo-50 rounded-lg transition"
+              className="relative shrink-0 p-1.5 text-slate-600 hover:bg-indigo-50 rounded-lg transition sm:p-2"
               aria-label="Notifications"
             >
               <Radio className="w-5 h-5" />
@@ -1094,10 +1186,10 @@ export default function App() {
           {canAssignTasks && (
             <button
               onClick={handleOpenCreateTask}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs sm:text-sm px-3.5 py-2 rounded-lg flex items-center gap-1.5 shadow-sm shadow-indigo-500/20 transition"
+              className="shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-xs sm:text-sm px-2 sm:px-3.5 py-2 rounded-lg flex items-center gap-1.5 shadow-sm shadow-indigo-500/20 transition"
             >
               <Plus className="w-4 h-4" />
-              <span>Create Task</span>
+              <span className="hidden min-[400px]:inline">Create Task</span>
             </button>
           )}
         </div>
@@ -1131,7 +1223,10 @@ export default function App() {
       {/* Main Workspace Layout */}
       <div className="min-h-0 flex-1 flex overflow-hidden">
         {/* Sidebar Navigation */}
+        {isMobileMenuOpen && <button type="button" aria-label="Close navigation" onClick={() => setIsMobileMenuOpen(false)} className="fixed inset-0 z-30 bg-slate-900/30 lg:hidden" />}
         <aside
+          id="workspace-navigation"
+          aria-label="Workspace navigation"
           className={`fixed inset-y-0 left-0 z-40 w-64 min-h-0 bg-white border-r border-slate-200 flex flex-col pt-16 lg:pt-0 transition-transform lg:fixed lg:translate-x-0 ${
             isMobileMenuOpen ? "translate-x-0" : "-translate-x-full"
           }`}
@@ -1142,23 +1237,7 @@ export default function App() {
               <p className="text-sm font-extrabold text-slate-900">Dectrocel</p>
               <p className="text-[10px] font-bold uppercase text-indigo-600">Healthcare and Research</p>
             </div>
-          </div>
-
-          {/* User Profile Card */}
-          <div className="p-4 border-b border-indigo-50 bg-indigo-50/40 flex items-center gap-3">
-            <div className="w-10 h-10 rounded-full bg-indigo-100 text-indigo-800 font-bold flex items-center justify-center text-sm ring-2 ring-indigo-200">
-              {initials(currentUser?.name)}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="font-bold text-sm text-slate-900 truncate">
-                {currentUser?.name === "Admin" ? "Administrator" : currentUser?.name}
-              </p>
-              <div className="flex items-center gap-1.5 mt-0.5">
-                <span className="badge bg-indigo-50 text-indigo-700 border border-indigo-200 text-[11px]">
-                  {currentUser?.role === "Admin" ? "Admin" : currentUser?.role}
-                </span>
-              </div>
-            </div>
+            <button type="button" onClick={() => setIsMobileMenuOpen(false)} aria-label="Close workspace navigation" className="ml-auto rounded-lg p-2 text-slate-500 hover:bg-slate-100 lg:hidden"><X className="h-4 w-4" /></button>
           </div>
 
           <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 space-y-1 text-xs sm:text-sm font-medium">
@@ -1394,25 +1473,9 @@ export default function App() {
             </button>
             )}
 
-            {role === "Admin" && (
-            <button
-              onClick={() => {
-                setCurrentView("settings");
-                setIsMobileMenuOpen(false);
-              }}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
-                currentView === "settings"
-                  ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60"
-                  : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"
-              }`}
-            >
-              <Settings className="w-4 h-4 text-indigo-500" />
-              <span>Settings</span>
-            </button>
-            )}
           </nav>
 
-          <div className="p-3 border-t border-slate-100 text-xs text-slate-500">
+          <div className="app-safe-bottom p-3 border-t border-slate-100 text-xs text-slate-500">
             <div className="bg-indigo-50/60 p-2.5 rounded-lg border border-indigo-200/70">
               <p className="font-bold text-indigo-900">Dectrocel Healthcare and Research</p>
               <p className="text-[11px] text-indigo-600 mt-0.5">
@@ -2597,39 +2660,119 @@ export default function App() {
 
               {/* ----------------- VIEW 8: CALENDAR ----------------- */}
               {currentView === "calendar" && (
-                <div className="space-y-6 max-w-7xl mx-auto">
-                  <div>
-                    <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
-                      Calendar & Deadlines
-                    </h1>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                      Schedule overview of upcoming deliverables and task target dates
-                    </p>
-                  </div>
-
-                  <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs">
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {tasksList
-                        .filter((t) => t.dueDate)
-                        .sort((a, b) => (a.dueDate! > b.dueDate! ? 1 : -1))
-                        .map((task) => (
-                          <div
-                            key={task.id}
-                            onClick={() => setSelectedTaskId(task.id)}
-                            className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 hover:bg-emerald-50/30 transition cursor-pointer"
-                          >
-                            <div className="flex items-center justify-between text-xs mb-1">
-                              <span className="font-mono font-bold text-emerald-700">{task.taskCode}</span>
-                              <span className="font-bold text-slate-600 bg-white px-2 py-0.5 rounded border border-slate-200">
-                                {task.dueDate}
-                              </span>
-                            </div>
-                            <h3 className="font-bold text-sm text-slate-900 truncate mt-1">{task.title}</h3>
-                            <p className="text-xs text-slate-500 mt-0.5">Owner: {task.assignedToName}</p>
-                          </div>
+                <div className="mx-auto max-w-7xl min-w-0 space-y-5">
+                  <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
+                    <div className="min-w-0">
+                      <h1 className="text-2xl font-black font-display tracking-tight text-slate-900">Calendar & Deadlines</h1>
+                      <p className="mt-1 text-sm text-slate-500">Browse authorized task deadlines by month, week, or day.</p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex items-center rounded-lg border border-slate-200 bg-white p-1">
+                        <button type="button" aria-label="Previous period" onClick={() => moveCalendar(-1)} className="rounded-md p-2 text-slate-600 hover:bg-slate-100"><ChevronLeft className="h-4 w-4" /></button>
+                        <button type="button" onClick={() => setCalendarDate(new Date())} className="px-2 py-1 text-xs font-bold text-indigo-700 hover:bg-indigo-50 rounded-md">Today</button>
+                        <button type="button" aria-label="Next period" onClick={() => moveCalendar(1)} className="rounded-md p-2 text-slate-600 hover:bg-slate-100"><ChevronRight className="h-4 w-4" /></button>
+                      </div>
+                      <span className="min-w-36 text-center text-sm font-bold text-slate-800">{calendarHeading}</span>
+                      <div className="flex rounded-lg border border-slate-200 bg-white p-1" role="group" aria-label="Calendar view">
+                        {(["Month", "Week", "Day"] as const).map((mode) => (
+                          <button key={mode} type="button" aria-pressed={calendarMode === mode} onClick={() => setCalendarMode(mode)} className={`rounded-md px-2.5 py-1.5 text-xs font-bold ${calendarMode === mode ? "bg-indigo-600 text-white" : "text-slate-600 hover:bg-slate-100"}`}>{mode}</button>
                         ))}
+                      </div>
                     </div>
                   </div>
+
+                  <div className="grid min-w-0 grid-cols-1 gap-3 rounded-xl border border-slate-200 bg-white p-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <label className="min-w-0 text-xs font-semibold text-slate-600">Project
+                      <select value={calendarProjectFilter} onChange={(event) => setCalendarProjectFilter(event.target.value)} className="mt-1 block w-full min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                        <option value="All">All projects</option>{projectsList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="min-w-0 text-xs font-semibold text-slate-600">Employee
+                      <select value={calendarEmployeeFilter} onChange={(event) => setCalendarEmployeeFilter(event.target.value)} className="mt-1 block w-full min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                        <option value="All">All employees</option>{usersList.map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
+                      </select>
+                    </label>
+                    <label className="min-w-0 text-xs font-semibold text-slate-600">Status
+                      <select value={calendarStatusFilter} onChange={(event) => setCalendarStatusFilter(event.target.value)} className="mt-1 block w-full min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                        <option value="All">All statuses</option>{taskStatusOptions.map((status) => <option key={status}>{status}</option>)}
+                      </select>
+                    </label>
+                    <label className="min-w-0 text-xs font-semibold text-slate-600">Priority
+                      <select value={calendarPriorityFilter} onChange={(event) => setCalendarPriorityFilter(event.target.value)} className="mt-1 block w-full min-w-0 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                        <option value="All">All priorities</option>{taskPriorityOptions.map((priority) => <option key={priority}>{priority}</option>)}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px] font-semibold text-slate-600" aria-label="Calendar status legend">
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-indigo-500" />Upcoming</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-red-500" />Overdue</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-emerald-500" />Completed</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-rose-500" />Blocked</span>
+                  </div>
+
+                  {calendarMode === "Month" && (
+                    <div className="hidden overflow-hidden rounded-xl border border-slate-200 bg-white shadow-xs sm:block">
+                      <div className="grid grid-cols-7 border-b border-slate-200 bg-slate-50 text-center text-[11px] font-bold uppercase tracking-wide text-slate-500">
+                        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((day) => <div key={day} className="py-3">{day}</div>)}
+                      </div>
+                      <div className="grid grid-cols-7">
+                        {calendarDays.map((day) => {
+                          const key = localDateString(day);
+                          const dayTasks = calendarTasksByDate.get(key) || [];
+                          const inMonth = day.getMonth() === calendarDate.getMonth();
+                          return (
+                            <div key={key} className={`min-h-28 min-w-0 border-b border-r border-slate-100 p-1.5 ${inMonth ? "bg-white" : "bg-slate-50/70"}`}>
+                              <div className={`mb-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${key === localDateString() ? "bg-indigo-600 text-white" : inMonth ? "text-slate-700" : "text-slate-400"}`}>{day.getDate()}</div>
+                              <div className="space-y-1">
+                                {dayTasks.slice(0, 3).map((task) => (
+                                  <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded border px-1.5 py-1 text-left text-[10px] leading-tight ${calendarTaskTone(task)}`} title={`${task.title} · ${task.projectName} · ${task.assignedToName} · ${task.status} · ${task.priority}`}>
+                                    <span className="block truncate font-bold">{task.title}</span><span className="block truncate">{task.projectName} · {task.assignedToName} · {task.priority} · {task.status}</span>
+                                  </button>
+                                ))}
+                                {dayTasks.length > 3 && <p className="px-1 text-[10px] font-semibold text-slate-500">+{dayTasks.length - 3} more</p>}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {calendarMode !== "Month" && (
+                    <div className="hidden overflow-x-auto rounded-xl border border-slate-200 bg-white sm:block">
+                      <div className={`grid ${calendarMode === "Week" ? "min-w-[760px] grid-cols-7" : "grid-cols-1"}`}>
+                        {calendarDays.map((day) => {
+                          const key = localDateString(day);
+                          const dayTasks = calendarTasksByDate.get(key) || [];
+                          return <section key={key} className="min-h-52 min-w-0 border-r border-slate-100 p-3">
+                            <h2 className="mb-3 border-b border-slate-100 pb-2 text-xs font-bold text-slate-700">{day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}</h2>
+                            <div className="space-y-2">{dayTasks.map((task) => (
+                              <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded-lg border p-2 text-left ${calendarTaskTone(task)}`}>
+                                <span className="block break-words text-xs font-bold">{task.title}</span>
+                                <span className="mt-1 block break-words text-[11px]">{task.projectName} · {task.assignedToName}</span>
+                                <span className="mt-1 flex flex-wrap gap-1 text-[10px]"><span>{task.status}</span><span>· {task.priority}</span><span>· Due {task.dueDate}</span></span>
+                              </button>
+                            ))}</div>
+                          </section>;
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="space-y-2 sm:hidden">
+                    {calendarVisibleTasks.map((task) => (
+                      <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded-xl border p-3 text-left ${calendarTaskTone(task)}`}>
+                        <div className="flex flex-wrap items-start justify-between gap-2"><span className="min-w-0 break-words text-sm font-bold">{task.title}</span><span className="shrink-0 text-xs font-semibold">{task.dueDate}</span></div>
+                        <p className="mt-1 break-words text-xs">{task.projectName} · {task.assignedToName}</p>
+                        <p className="mt-1 text-xs">{task.status} · {task.priority}</p>
+                      </button>
+                    ))}
+                  </div>
+
+                  {calendarVisibleTasks.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">No tasks match the filters for this {calendarMode.toLowerCase()}.</div>
+                  )}
                 </div>
               )}
 
@@ -2923,41 +3066,6 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 </div>
               )}
 
-              {/* ----------------- VIEW 12: SETTINGS ----------------- */}
-              {currentView === "settings" && role === "Admin" && (
-                <div className="space-y-6 max-w-7xl mx-auto">
-                  <div>
-                    <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
-                      Settings & Configuration
-                    </h1>
-                    <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                      System settings, theme configuration, and portal telemetry
-                    </p>
-                  </div>
-
-                  <div className="bg-white rounded-xl border border-slate-200 p-6 space-y-4">
-                    <h3 className="font-bold text-sm text-slate-800">Application Identity</h3>
-                    <div className="grid grid-cols-2 gap-4 text-xs">
-                      <div>
-                        <span className="text-slate-500">Platform Name:</span>
-                        <p className="font-bold text-slate-900 mt-0.5">Dectrocel Healthcare and Research</p>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">Visual Palette:</span>
-                        <p className="font-bold text-emerald-700 mt-0.5">Emerald Green & Clean White</p>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">Database Engine:</span>
-                        <p className="font-bold text-slate-900 mt-0.5">PostgreSQL 18</p>
-                      </div>
-                      <div>
-                        <span className="text-slate-500">Active Persona:</span>
-                        <p className="font-bold text-slate-900 mt-0.5">{currentUser?.name} ({currentUser?.role})</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
             </>
           )}
         </main>

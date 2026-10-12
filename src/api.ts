@@ -288,34 +288,58 @@ export type DailyProgressReport = {
 
 export type NewDailyProgressReport = Omit<DailyProgressReport, "id">;
 
+const inFlightGetRequests = new Map<string, Promise<unknown>>();
+
+function clearInFlightGetRequests() {
+  inFlightGetRequests.clear();
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...init?.headers,
-    },
-  });
+  const method = (init?.method || "GET").toUpperCase();
+  const existingRequest = method === "GET" ? inFlightGetRequests.get(path) : undefined;
+  if (existingRequest) return existingRequest as Promise<T>;
 
-  if (!response.ok) {
-    const payload: unknown = await response.json().catch(() => null);
-    const message =
-      typeof payload === "object" &&
-      payload !== null &&
-      "error" in payload &&
-      typeof (payload as any).error === "string"
-        ? (payload as any).error
-        : `Request failed (${response.status}).`;
-    throw new Error(message);
+  const pendingRequest = (async () => {
+    const response = await fetch(path, {
+      ...init,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...init?.headers,
+      },
+    });
+
+    if (!response.ok) {
+      const payload: unknown = await response.json().catch(() => null);
+      const message =
+        typeof payload === "object" &&
+        payload !== null &&
+        "error" in payload &&
+        typeof (payload as any).error === "string"
+          ? (payload as any).error
+          : `Request failed (${response.status}).`;
+      throw new Error(message);
+    }
+
+    if (response.status === 204) return undefined as T;
+    return response.json() as Promise<T>;
+  })();
+
+  if (method !== "GET") return pendingRequest;
+
+  inFlightGetRequests.set(path, pendingRequest);
+  try {
+    return await pendingRequest as T;
+  } finally {
+    if (inFlightGetRequests.get(path) === pendingRequest) {
+      inFlightGetRequests.delete(path);
+    }
   }
-
-  if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
 }
 
 // User & Auth APIs
 export function login(identifier: string, password: string) {
+  clearInFlightGetRequests();
   return request<User>("/api/auth/login", {
     method: "POST",
     body: JSON.stringify({ identifier, password }),
@@ -323,6 +347,7 @@ export function login(identifier: string, password: string) {
 }
 
 export function logout() {
+  clearInFlightGetRequests();
   return request<void>("/api/auth/logout", { method: "POST" });
 }
 
