@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: { assetsInlineLimit: 0 },
   server: {
     proxy: {
       "/api": "http://127.0.0.1:3001",

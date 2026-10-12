@@ -1,5 +1,22 @@
 # Performance changes and verification
 
+## Follow-up to the deployed Lighthouse PDF (October 13, 2026)
+
+The supplied report audited the authenticated desktop dashboard: 96 performance, 94 accessibility, 100 best practices and 92 SEO. Its robots failure came from the SPA HTML being returned for `/robots.txt`. Read-only checks also confirmed the deployed JavaScript had no cache or compression headers.
+
+Changes for this report:
+
+- Added `public/robots.txt` and an exact Nginx location so crawler requests cannot fall through to HTML.
+- Increased contrast for sign-out, New Assignment, sidebar headings, empty states and secondary dashboard text.
+- Generate 48/96/192px WebP logo variants during build/dev startup and select them with `srcset`, with explicit image dimensions. Files are 512/1,176/2,494 bytes versus the original 11,440-byte PNG.
+- Start the initial authorized data requests in parallel with downloading the workspace chunk, then reuse those promises instead of fetching twice.
+- Added an HTTPS Nginx template for the actual domain with HTTP/2, static asset caching and both JavaScript compression MIME types. Apply it to the active HTTPS virtual host as described in `deploy/EC2.md`; changing the repository alone does not update the live server.
+- Added an authenticated dashboard accessibility regression check and robots/image/cache response tests.
+
+The authenticated audit fixture is available with `node scripts/performance-server.mjs --authenticated` (set `PERF_PORT` to choose a port). It uses synthetic data, does not connect to a database, and is only a local testing server. Audit it with Lighthouse's `--preset=desktop` to match the PDF's device class. Browser/database/network conditions still differ from production.
+
+Final local authenticated desktop results: **100 performance, 100 accessibility, 100 best practices, 100 SEO**; FCP 0.4 s, LCP 0.5 s, TBT 0 ms and CLS 0. The production build and all five browser checks passed, including the authenticated axe accessibility scan. Reports: `performance-results/dashboard.report.html` and `.json`. These results do not certify the live deployment; HTTPS configuration still needs to be applied and verified there.
+
 ## Measured result (October 12, 2026)
 
 Final local Lighthouse mobile run against the compressed, prerendered production sign-in page:

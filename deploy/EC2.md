@@ -67,6 +67,24 @@ sudo systemctl reload nginx
 
 Confirm `http://127.0.0.1:3001/api/health` returns `{"status":"ok",...}` on the instance and that the site loads through Nginx. Configure HTTPS for the domain before sharing the app. Production authentication cookies are marked `Secure`, so sign-in requires HTTPS in a browser.
 
+### Existing HTTPS deployment (Lighthouse report fixes)
+
+Use `deploy/nginx.https.conf.example` as the production site definition for `task.admindectrocel.online`. Preserve the installed certificate paths and set `root` to the actual deployed `dist` directory. Replace the existing matching site definition; do not create a second site with the same hostname. Apply the cache and gzip directives to the **443 server block** that serves the application, not only the port 80 redirect block.
+
+The template uses `http2 on` for Nginx 1.25.1 and later (the audited server reports 1.28.3). For an older installation, use `listen 443 ssl http2` and `listen [::]:443 ssl http2` instead, and omit `http2 on`. See the [official HTTP/2 documentation](https://nginx.org/en/docs/http/ngx_http_v2_module.html).
+
+After rebuilding the application and updating that site definition:
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+curl --http2 -I https://task.admindectrocel.online/
+curl -i https://task.admindectrocel.online/robots.txt
+# Substitute a current hashed .js asset path from the deployed index.html:
+curl -I -H 'Accept-Encoding: gzip' https://task.admindectrocel.online/assets/ACTUAL-BUNDLE.js
+```
+
+Expect HTTP/2, a plain-text robots file, and `Cache-Control: public, max-age=31536000, immutable` plus `Content-Encoding: gzip` on JavaScript. The [gzip MIME types](https://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_types) include both JavaScript MIME types. Missing assets must return 404 rather than the SPA document. HTML revalidates; personalized API responses remain private/no-store. Robots directives are crawler hints, not access controls; API authorization remains enforced.
+
 ## 4. Updating the deployment
 
 Copy the updated source to the instance and rebuild with the same commands in step 2. Then restart the API and reload Nginx if its configuration changed:

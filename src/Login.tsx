@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Eye } from "lucide-react";
 import { login, type User } from "./api";
-const companyLogo = new URL("../images/logo.png", import.meta.url).href;
+import CompanyLogo from "./CompanyLogo";
 export default function Login({ onAuthenticated, checking = false }: { onAuthenticated: (user: User) => void; checking?: boolean }) {
   const [loginIdentifier, setLoginIdentifier] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -29,9 +29,8 @@ export default function Login({ onAuthenticated, checking = false }: { onAuthent
 
 
 <div className="relative flex items-center gap-6">
-  <img
-    src={companyLogo}
-    alt="Dectrocel logo"
+  <CompanyLogo
+    size={96}
     className="h-24 w-24 shrink-0 rounded-2xl bg-white p-2 object-contain shadow-xl"
   />
   <div>
@@ -75,7 +74,7 @@ export default function Login({ onAuthenticated, checking = false }: { onAuthent
           <div className="w-full max-w-sm">
             {/* Mobile logo */}
             <div className="mb-8 flex items-center gap-3 lg:hidden">
-              <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 rounded-xl object-contain shadow" />
+              <CompanyLogo className="h-12 w-12 rounded-xl object-contain shadow" />
               <div>
                 <p className="font-extrabold text-slate-900">Dectrocel</p>
                 <p className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest">Healthcare and Research</p>

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 
 test("mobile sign-in content is present before JavaScript executes", async ({ browser }) => {
   const context = await browser.newContext({ javaScriptEnabled: false, viewport: { width: 390, height: 844 } });
@@ -37,6 +38,7 @@ test("login errors remain visible and allow retry", async ({ page }) => {
 });
 
 test("authenticated startup defers unrelated data and avoids another identity request", async ({ page }) => {
+  await page.setViewportSize({ width: 1365, height: 1000 });
   const paths: string[] = [];
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -61,4 +63,26 @@ test("authenticated startup defers unrelated data and avoids another identity re
   expect(paths).not.toContain("/api/project-allotments");
   expect(paths.some((path) => path.startsWith("/api/daily-reports"))).toBe(false);
   expect(errors).toEqual([]);
+  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  for (const path of ["/api/users", "/api/teams", "/api/projects", "/api/tasks", "/api/analytics/dashboard", "/api/notifications"]) {
+    expect(paths.filter((requested) => requested === path)).toHaveLength(1);
+  }
+  const accessibility = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
+  expect(accessibility.violations).toEqual([]);
+});
+
+test("crawler and asset responses have correct content types and cache headers", async ({ request, page }) => {
+  const robots = await request.get("/robots.txt");
+  expect(robots.status()).toBe(200);
+  expect(robots.headers()["content-type"]).toContain("text/plain");
+  expect(await robots.text()).toContain("User-agent: *");
+  expect(await robots.text()).not.toContain("<!doctype");
+  await page.goto("/");
+  const logo = page.locator('img[alt="Dectrocel logo"]:visible').first();
+  const source = await logo.evaluate((image: HTMLImageElement) => image.currentSrc);
+  expect(source).toMatch(/logo-(48|96|192)-.*\.webp$/);
+  const image = await request.get(source);
+  expect(image.headers()["cache-control"]).toContain("immutable");
+  expect((await image.body()).byteLength).toBeLessThan(6000);
+  expect((await request.get("/assets/missing.js")).status()).toBe(404);
 });
