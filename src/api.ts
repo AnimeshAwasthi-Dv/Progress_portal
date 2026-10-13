@@ -38,6 +38,7 @@ export type User = {
   designation: string;
   avatarUrl?: string | null;
   isActive: boolean;
+  isHiddenFromAdmin?: boolean;
   mustChangePassword: boolean;
   teamId?: number | null;
   teamName?: string | null;
@@ -396,6 +397,10 @@ export function deactivateEmployee(id: number, input: { reassignToUserId?: numbe
     method: "PATCH",
     body: JSON.stringify(input),
   });
+}
+
+export function hideInactiveEmployeeProfile(id: number) {
+  return request<{ success: boolean }>(`/api/users/${id}/hide-profile`, { method: "PATCH" });
 }
 
 // Teams APIs

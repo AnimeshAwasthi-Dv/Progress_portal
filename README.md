@@ -16,7 +16,7 @@ Internal team dashboard backed by a local PostgreSQL database.
 
 The development command starts the Vite frontend and the local API. The API listens on `127.0.0.1:3001`; Vite proxies `/api` requests to it.
 
-On startup, the API creates the required tables when missing and adds missing assignment fields without changing existing employee data. It does not create demo employees, projects, tasks, notifications, or allotments. On a fresh database, it creates only the initial Admin profile and the Sales and Technical teams so an administrator can sign in and add organization data manually. Set `INITIAL_ADMIN_PASSWORD` in `.env` before starting with an empty database; use a unique password of at least 12 characters.
+On startup, the API creates the required tables when missing and adds missing assignment fields without changing existing employee data. It does not create demo employees, projects, tasks, notifications, or allotments. On a fresh database, it creates only the initial Admin profile and the Sales and Technical teams so an administrator can sign in and add organization data manually. Set `INITIAL_ADMIN_PASSWORD` in `.env` before starting with an empty database; use a unique password of 7-8 characters with at least one letter and one number.
 
 Use **Daily Reports** to review the reports visible to the active user for a selected date. Individual reports are attributed to the active profile; managers see reports within their authorized team/project scope.
 

@@ -18,6 +18,7 @@ import {
   updateProjectAllotmentProgress,
   listUsers,
   getUserById,
+  hideInactiveUserProfile,
   authenticateUser,
   createAuthSession,
   getUserForSession,
@@ -104,7 +105,7 @@ function clearSessionCookie(response: Response) {
 }
 
 function validPassword(password: string) {
-  return password.length >= 12 && password.length <= 128 && /[A-Za-z]/.test(password) && /\d/.test(password);
+  return password.length >= 7 && password.length <= 8 && /[A-Za-z]/.test(password) && /\d/.test(password);
 }
 
 async function authMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -227,7 +228,7 @@ app.post(
     const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
     const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
     if (!validPassword(newPassword)) {
-      res.status(400).json({ error: "Use a password of 12-128 characters with at least one letter and one number." });
+      res.status(400).json({ error: "Use a password of 7-8 characters with at least one letter and one number." });
       return;
     }
     const updated = await changeUserPassword(req.currentUser!.id, currentPassword, newPassword, req.sessionToken!);
@@ -268,7 +269,7 @@ app.post(
       typeof password !== "string" || !validPassword(password) ||
       typeof role !== "string" || !userRoleOptions.includes(role as UserRole)
     ) {
-      res.status(400).json({ error: "Provide a valid name, username, email, password, and role. Passwords require 12-128 characters with a letter and number." });
+      res.status(400).json({ error: "Provide a valid name, username, email, password, and role. Passwords require 7-8 characters with a letter and number." });
       return;
     }
     if (req.currentUser?.role === "Team Lead" && role !== "Individual") {
@@ -402,6 +403,25 @@ app.patch(
       return;
     }
     res.json({ user: result.user, reassignedTaskCount: result.reassignedTaskCount });
+  }),
+);
+
+app.patch(
+  "/api/users/:id/hide-profile",
+  authMiddleware,
+  requireRole(["Admin"]),
+  asyncRoute(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) {
+      res.status(400).json({ error: "Valid User ID required." });
+      return;
+    }
+    const hidden = await hideInactiveUserProfile(id);
+    if (!hidden) {
+      res.status(404).json({ error: "Only inactive individual profiles can be removed from the employee list." });
+      return;
+    }
+    res.json({ success: true });
   }),
 );
 
@@ -655,8 +675,7 @@ app.patch(
 
     // Individual role restrictions
     if (user.role === "Individual") {
-      const isOwnerOrCollab = task.assignedToUserId === user.id || task.collaboratorIds?.includes(user.id);
-      if (!isOwnerOrCollab) {
+      if (task.assignedToUserId !== user.id) {
         res.status(403).json({ error: "You are not authorized to modify this task." });
         return;
       }
@@ -674,9 +693,9 @@ app.patch(
         res.status(403).json({ error: "This task requires reviewer approval before being marked Completed. Please submit for review." });
         return;
       }
-      const allowedFields = new Set(["status", "progressPercent", "actualHours", "pullRequestUrl", "blockerReason"]);
+      const allowedFields = new Set(["title", "description", "priority", "dueDate", "acceptanceCriteria", "repositoryUrl", "pullRequestUrl", "status", "progressPercent", "actualHours", "blockerReason"]);
       if (Object.keys(body).some((field) => !allowedFields.has(field))) {
-        res.status(403).json({ error: "Individual contributors may only update progress, status, work hours, pull request, and blocker fields." });
+        res.status(403).json({ error: "You may edit task details and your work progress, but cannot change project, ownership, or reviewer." });
         return;
       }
     }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -25,6 +25,7 @@ import {
   Menu,
   MessageSquare,
   Network,
+  Pencil,
   Plus,
   Radio,
   RefreshCw,
@@ -67,6 +68,7 @@ import {
   getTeamWorkloadAnalytics,
   getTeams,
   getUsers,
+  hideInactiveEmployeeProfile,
   login,
   logout,
   markAllNotificationsRead,
@@ -511,7 +513,7 @@ export default function App() {
   const calendarHeading = calendarMode === "Day"
     ? calendarDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })
     : calendarMode === "Week"
-      ? `${calendarPeriodStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${shiftDate(calendarPeriodStart, 6).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
+      ? `${calendarPeriodStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} â€“ ${shiftDate(calendarPeriodStart, 6).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
       : calendarDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 
   const calendarTaskTone = (task: Task) => {
@@ -554,6 +556,27 @@ export default function App() {
     setIsTaskModalOpen(true);
   };
 
+  const handleOpenEditTask = (task: Task) => {
+    setTaskFormData({
+      title: task.title,
+      description: task.description || "",
+      projectId: task.projectId,
+      assignedToUserId: task.assignedToUserId,
+      reviewerUserId: task.reviewerUserId,
+      priority: task.priority,
+      status: task.status,
+      startDate: task.startDate || "",
+      dueDate: task.dueDate || "",
+      estimatedHours: task.estimatedHours || 0,
+      acceptanceCriteria: task.acceptanceCriteria || "",
+      repositoryUrl: task.repositoryUrl || "",
+      pullRequestUrl: task.pullRequestUrl || "",
+      collaboratorIds: task.collaboratorIds || [],
+    });
+    setEditingTaskId(task.id);
+    setIsTaskModalOpen(true);
+  };
+
   const handleSaveTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!taskFormData.title.trim() || !taskFormData.projectId || !taskFormData.assignedToUserId) {
@@ -563,7 +586,10 @@ export default function App() {
 
     try {
       if (editingTaskId) {
-        const updated = await updateTask(editingTaskId, taskFormData);
+        const payload = role === "Individual"
+          ? { title: taskFormData.title, description: taskFormData.description, priority: taskFormData.priority, dueDate: taskFormData.dueDate || null, acceptanceCriteria: taskFormData.acceptanceCriteria, repositoryUrl: taskFormData.repositoryUrl || null, pullRequestUrl: taskFormData.pullRequestUrl || null }
+          : taskFormData;
+        const updated = await updateTask(editingTaskId, payload);
         setTasksList((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
         if (selectedTaskId === editingTaskId) setSelectedTask(updated);
         setSuccessMessage(`Task ${updated.taskCode} updated successfully.`);
@@ -781,6 +807,18 @@ export default function App() {
     }
   };
 
+  const handleHideInactiveProfile = async (user: AppUser) => {
+    if (role !== "Admin" || user.isActive || !window.confirm(`Remove ${user.name}'s inactive profile from the employee list? Their task history will be retained.`)) return;
+    try {
+      await hideInactiveEmployeeProfile(user.id);
+      setUsersList((users) => users.map((item) => item.id === user.id ? { ...item, isHiddenFromAdmin: true } : item));
+      setSuccessMessage(`${user.name}'s inactive profile was removed from the employee list.`);
+      setTimeout(() => setSuccessMessage(""), 4000);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Could not remove the inactive profile.");
+    }
+  };
+
   const openCreateProfile = () => {
     setUserFormData({
       name: "",
@@ -831,7 +869,8 @@ export default function App() {
   const canManageUsers = role === "Admin" || role === "Team Lead";
   const canManageEmployees = role === "Admin" || role === "Manager" || role === "Team Lead";
   const canAssignTasks = role === "Admin" || role === "Manager" || role === "Team Lead";
-  const canRemoveTask = (task: Task) => role === "Admin" || role === "Team Lead" || (role === "Individual" && task.assignedToUserId === currentUser?.id);
+  const canRemoveTask = (_task: Task) => role === "Admin";
+  const canEditTask = (task: Task) => canAssignTasks || (role === "Individual" && task.assignedToUserId === currentUser?.id);
 
   const handleDeleteTask = async (task: Task) => {
     if (!canRemoveTask(task) || !window.confirm(`Remove task ${task.taskCode}? This will permanently delete its task history and comments.`)) return;
@@ -854,13 +893,14 @@ export default function App() {
     const query = employeeSearch.trim().toLocaleLowerCase();
     return usersList.filter((user) => {
       if (user.role !== "Individual") return false;
+      if (role === "Admin" && user.isHiddenFromAdmin) return false;
       if (employeeTeamFilter !== "All" && String(user.teamId || "") !== employeeTeamFilter) return false;
       if (employeeStatusFilter === "Active" && !user.isActive) return false;
       if (employeeStatusFilter === "Inactive" && user.isActive) return false;
       if (query && !`${user.name} ${user.email} ${user.designation}`.toLocaleLowerCase().includes(query)) return false;
       return true;
     });
-  }, [usersList, employeeSearch, employeeTeamFilter, employeeStatusFilter]);
+  }, [usersList, employeeSearch, employeeTeamFilter, employeeStatusFilter, role]);
 
   const adminUsers = useMemo(() => {
     return usersList.filter((u) => u.role === "Admin");
@@ -913,7 +953,7 @@ export default function App() {
   if (!isLoading && !currentUser) {
     return (
       <main className="min-h-screen font-sans grid lg:grid-cols-[minmax(0,1fr)_minmax(400px,520px)]">
-        {/* Left panel — purple/indigo gradient */}
+        {/* Left panel â€” purple/indigo gradient */}
         <section className="hidden lg:flex flex-col justify-between p-12 text-white relative overflow-hidden"
           style={{ background: "linear-gradient(135deg, #312e81 0%, #4338ca 40%, #6366f1 70%, #818cf8 100%)" }}>
           {/* decorative blobs */}
@@ -953,17 +993,17 @@ export default function App() {
   </p>
 
   <div className="mt-8 flex flex-wrap gap-6 text-sm font-semibold text-indigo-200">
-    <span>🔒 Secure sessions</span>
-    <span>🏥 Healthcare grade</span>
-    <span>⚡ Real-time sync</span>
+    <span>ðŸ”’ Secure sessions</span>
+    <span>ðŸ¥ Healthcare grade</span>
+    <span>âš¡ Real-time sync</span>
   </div>
 </div>
 
 
-          <p className="relative text-xs text-indigo-300">© {new Date().getFullYear()} Dectrocel Healthcare and Research</p>
+          <p className="relative text-xs text-indigo-300">Â© {new Date().getFullYear()} Dectrocel Healthcare and Research</p>
         </section>
 
-        {/* Right panel — form */}
+        {/* Right panel â€” form */}
         <section className="flex min-h-screen items-center justify-center bg-slate-50 p-6 sm:p-10">
           <div className="w-full max-w-sm">
             {/* Mobile logo */}
@@ -1013,7 +1053,7 @@ export default function App() {
                     value={loginPassword}
                     onChange={(e) => setLoginPassword(e.target.value)}
                     className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 pr-11 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-                    placeholder="••••••••••••"
+                    placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
                   />
                   <button
                     type="button"
@@ -1031,7 +1071,7 @@ export default function App() {
                 className="w-full rounded-xl py-2.5 text-sm font-bold text-white transition disabled:opacity-60"
                 style={{ background: "linear-gradient(135deg, #4338ca, #6366f1)" }}
               >
-                {isLoading ? "Signing in…" : "Sign in"}
+                {isLoading ? "Signing inâ€¦" : "Sign in"}
               </button>
             </form>
           </div>
@@ -1063,10 +1103,10 @@ export default function App() {
             <div>
               <label htmlFor="new-password" className="mb-1.5 block text-sm font-semibold text-slate-700">New password</label>
               <div className="relative">
-                <input id="new-password" type={showNewPassword ? "text" : "password"} minLength={12} maxLength={128} autoComplete="new-password" required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 pr-11 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
+                <input id="new-password" type={showNewPassword ? "text" : "password"} minLength={7} maxLength={8} autoComplete="new-password" required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 pr-11 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
                 <button type="button" aria-label={showNewPassword ? "Hide" : "Show"} onClick={() => setShowNewPassword((v) => !v)} className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700"><Eye className="h-4 w-4" /></button>
               </div>
-              <p className="mt-1 text-xs text-slate-500">12–128 characters with at least one letter and one number.</p>
+              <p className="mt-1 text-xs text-slate-500">7-8 characters with at least one letter and one number.</p>
             </div>
             <div>
               <label htmlFor="confirm-password" className="mb-1.5 block text-sm font-semibold text-slate-700">Confirm new password</label>
@@ -1197,24 +1237,24 @@ export default function App() {
 
       {/* Global Alerts */}
       {errorMessage && (
-        <div className="bg-rose-50 border-l-4 border-rose-500 p-3 mx-4 lg:mx-8 mt-4 rounded-r-lg flex items-center justify-between text-rose-800 text-xs sm:text-sm animate-in fade-in">
-          <div className="flex items-center gap-2">
+        <div className="min-w-0 bg-rose-50 border-l-4 border-rose-500 p-3 mx-4 lg:ml-72 lg:mr-8 mt-4 rounded-r-lg flex items-start justify-between gap-3 text-rose-800 text-xs sm:text-sm animate-in fade-in">
+          <div className="flex min-w-0 items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{errorMessage}</span>
+            <span className="min-w-0 whitespace-normal break-words">{errorMessage}</span>
           </div>
-          <button onClick={() => setErrorMessage("")} className="hover:text-rose-950 font-bold p-1">
+          <button onClick={() => setErrorMessage("")} className="shrink-0 hover:text-rose-950 font-bold p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
       {successMessage && (
-        <div className="bg-emerald-50 border-l-4 border-emerald-500 p-3 mx-4 lg:mx-8 mt-4 rounded-r-lg flex items-center justify-between text-emerald-800 text-xs sm:text-sm animate-in fade-in">
-          <div className="flex items-center gap-2">
+        <div className="min-w-0 bg-emerald-50 border-l-4 border-emerald-500 p-3 mx-4 lg:ml-72 lg:mr-8 mt-4 rounded-r-lg flex items-start justify-between gap-3 text-emerald-800 text-xs sm:text-sm animate-in fade-in">
+          <div className="flex min-w-0 items-start gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
-            <span>{successMessage}</span>
+            <span className="min-w-0 whitespace-normal break-words">{successMessage}</span>
           </div>
-          <button onClick={() => setSuccessMessage("")} className="hover:text-emerald-950 font-bold p-1">
+          <button onClick={() => setSuccessMessage("")} className="shrink-0 hover:text-emerald-950 font-bold p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -1504,7 +1544,7 @@ export default function App() {
                         <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs px-2.5 py-0.5 rounded-full font-bold">
                           {currentUser?.role === "Admin" ? "Admin Console" : `${currentUser?.name} (${currentUser?.role})`}
                         </span>
-                        <span className="text-emerald-200/70 text-xs">• Connected to PostgreSQL Database</span>
+                        <span className="text-emerald-200/70 text-xs">â€¢ Connected to PostgreSQL Database</span>
                       </div>
                       <h1 className="text-xl sm:text-2xl font-black font-display tracking-tight">
                         DecTrack
@@ -1606,7 +1646,7 @@ export default function App() {
                           <button key={task.id} onClick={() => setSelectedTaskId(task.id)} className="w-full py-2.5 text-left flex items-center justify-between gap-4 hover:bg-amber-50/40">
                             <span className="min-w-0">
                               <span className="block text-sm font-semibold text-slate-900 truncate">{task.title}</span>
-                              <span className="text-xs text-slate-500">{task.taskCode} · {task.projectName}</span>
+                              <span className="text-xs text-slate-500">{task.taskCode} Â· {task.projectName}</span>
                             </span>
                             <span className={`shrink-0 text-xs font-bold ${task.status === "Blocked" ? "text-rose-700" : "text-amber-700"}`}>
                               {task.status === "Blocked" ? "Blocked" : `Due ${task.dueDate}`}
@@ -1662,7 +1702,7 @@ export default function App() {
                                   </div>
                                   <p className="font-semibold text-sm text-slate-900 truncate">{task.title}</p>
                                   <p className="text-xs text-slate-500 mt-0.5">
-                                    Project: <strong className="text-slate-700">{task.projectName}</strong> • Assigned to: <strong className="text-emerald-700 font-bold">{task.assignedToName}</strong>
+                                    Project: <strong className="text-slate-700">{task.projectName}</strong> â€¢ Assigned to: <strong className="text-emerald-700 font-bold">{task.assignedToName}</strong>
                                   </p>
                                 </div>
 
@@ -1775,7 +1815,7 @@ export default function App() {
                                   </p>
                                   {act.newValue && (
                                     <p className="text-slate-500 text-[11px] mt-0.5 font-mono">
-                                      {act.fieldChanged}: {act.oldValue ? `${act.oldValue} → ` : ""}
+                                      {act.fieldChanged}: {act.oldValue ? `${act.oldValue} â†’ ` : ""}
                                       {act.newValue}
                                     </p>
                                   )}
@@ -1948,7 +1988,7 @@ export default function App() {
                                     <span className="font-bold text-slate-900">{t.assignedToName}</span>
                                   </div>
                                 </td>
-                                <td className="py-3.5 px-4 text-slate-600">{t.reviewerName || "—"}</td>
+                                <td className="py-3.5 px-4 text-slate-600">{t.reviewerName || "â€”"}</td>
                                 <td className="py-3.5 px-4">
                                   <span className={`badge ${priorityBadgeStyles[t.priority].bg}`}>
                                     {t.priority}
@@ -1977,6 +2017,17 @@ export default function App() {
                                     >
                                       <Eye className="w-4 h-4" />
                                     </button>
+                                    {canEditTask(t) && (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => { e.stopPropagation(); handleOpenEditTask(t); }}
+                                        className="p-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 rounded-lg transition"
+                                        aria-label={`Edit task ${t.taskCode}`}
+                                        title="Edit task"
+                                      >
+                                        <Pencil className="w-4 h-4" />
+                                      </button>
+                                    )}
                                     {canRemoveTask(t) && (
                                       <button
                                         type="button"
@@ -2064,7 +2115,7 @@ export default function App() {
                               Lead: <strong className="text-slate-800">{project.leadName || "Unassigned"}</strong>
                             </p>
                             <p>
-                              Timeline: {project.startDate || "N/A"} → {project.targetDate || "N/A"}
+                              Timeline: {project.startDate || "N/A"} â†’ {project.targetDate || "N/A"}
                             </p>
                           </div>
                         </div>
@@ -2151,7 +2202,7 @@ export default function App() {
                                   </div>
                                   <ArrowRight className={`mt-1 h-4 w-4 transition ${isSelected ? "rotate-90 text-emerald-700" : "text-slate-400"}`} />
                                 </div>
-                                <p className="mt-3 text-xs text-slate-500">{activeMembers} active · {department.members.length - activeMembers} inactive</p>
+                                <p className="mt-3 text-xs text-slate-500">{activeMembers} active Â· {department.members.length - activeMembers} inactive</p>
                               </button>
                             );
                           })}
@@ -2176,7 +2227,7 @@ export default function App() {
                                     <span className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-sm font-bold text-slate-700">{initials(member.name)}</span>
                                     <div>
                                       <p className="font-bold text-sm text-slate-900">{member.name}</p>
-                                      <p className="text-xs text-slate-500">{member.designation} · {member.email}</p>
+                                      <p className="text-xs text-slate-500">{member.designation} Â· {member.email}</p>
                                     </div>
                                   </div>
                                   <div className="flex flex-wrap items-center gap-2 sm:justify-end">
@@ -2236,7 +2287,7 @@ export default function App() {
                               </div>
                               <div>
                                 <p className="font-bold text-sm text-slate-900">{admin.name}</p>
-                                <p className="text-xs text-slate-500">{admin.designation} • {admin.email}</p>
+                                <p className="text-xs text-slate-500">{admin.designation} â€¢ {admin.email}</p>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
@@ -2294,7 +2345,7 @@ export default function App() {
                                   </div>
                                 </div>
                                 <span className={`badge ${lead.isActive ? "bg-teal-50 text-teal-800" : "bg-slate-100 text-slate-500"} font-bold`}>
-                                  {lead.isActive ? lead.role : `${lead.role} · Inactive`}
+                                  {lead.isActive ? lead.role : `${lead.role} Â· Inactive`}
                                 </span>
                               </div>
 
@@ -2402,7 +2453,7 @@ export default function App() {
                                   </div>
                                   <div>
                                     <p className="font-bold text-sm text-slate-900">{ic.name}</p>
-                                    <p className="text-[11px] text-slate-500">{ic.designation} · {ic.teamName || "No team"}</p>
+                                    <p className="text-[11px] text-slate-500">{ic.designation} Â· {ic.teamName || "No team"}</p>
                                     <p className="text-[11px] text-slate-500 truncate">{ic.email}</p>
                                   </div>
                                 </div>
@@ -2435,6 +2486,16 @@ export default function App() {
                                   >
                                     <X className="w-3.5 h-3.5 inline mr-1" />
                                     Remove Employee
+                                  </button>
+                                )}
+                                {role === "Admin" && !ic.isActive && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleHideInactiveProfile(ic)}
+                                    className="w-full text-xs text-rose-700 border border-rose-200 hover:bg-rose-50 font-bold py-1.5 rounded-lg transition"
+                                  >
+                                    <X className="w-3.5 h-3.5 inline mr-1" />
+                                    Remove Inactive Profile
                                   </button>
                                 )}
                               </div>
@@ -2726,8 +2787,8 @@ export default function App() {
                               <div className={`mb-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${key === localDateString() ? "bg-indigo-600 text-white" : inMonth ? "text-slate-700" : "text-slate-400"}`}>{day.getDate()}</div>
                               <div className="space-y-1">
                                 {dayTasks.slice(0, 3).map((task) => (
-                                  <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded border px-1.5 py-1 text-left text-[10px] leading-tight ${calendarTaskTone(task)}`} title={`${task.title} · ${task.projectName} · ${task.assignedToName} · ${task.status} · ${task.priority}`}>
-                                    <span className="block truncate font-bold">{task.title}</span><span className="block truncate">{task.projectName} · {task.assignedToName} · {task.priority} · {task.status}</span>
+                                  <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded border px-1.5 py-1 text-left text-[10px] leading-tight ${calendarTaskTone(task)}`} title={`${task.title} Â· ${task.projectName} Â· ${task.assignedToName} Â· ${task.status} Â· ${task.priority}`}>
+                                    <span className="block truncate font-bold">{task.title}</span><span className="block truncate">{task.projectName} Â· {task.assignedToName} Â· {task.priority} Â· {task.status}</span>
                                   </button>
                                 ))}
                                 {dayTasks.length > 3 && <p className="px-1 text-[10px] font-semibold text-slate-500">+{dayTasks.length - 3} more</p>}
@@ -2750,8 +2811,8 @@ export default function App() {
                             <div className="space-y-2">{dayTasks.map((task) => (
                               <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded-lg border p-2 text-left ${calendarTaskTone(task)}`}>
                                 <span className="block break-words text-xs font-bold">{task.title}</span>
-                                <span className="mt-1 block break-words text-[11px]">{task.projectName} · {task.assignedToName}</span>
-                                <span className="mt-1 flex flex-wrap gap-1 text-[10px]"><span>{task.status}</span><span>· {task.priority}</span><span>· Due {task.dueDate}</span></span>
+                                <span className="mt-1 block break-words text-[11px]">{task.projectName} Â· {task.assignedToName}</span>
+                                <span className="mt-1 flex flex-wrap gap-1 text-[10px]"><span>{task.status}</span><span>Â· {task.priority}</span><span>Â· Due {task.dueDate}</span></span>
                               </button>
                             ))}</div>
                           </section>;
@@ -2764,8 +2825,8 @@ export default function App() {
                     {calendarVisibleTasks.map((task) => (
                       <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded-xl border p-3 text-left ${calendarTaskTone(task)}`}>
                         <div className="flex flex-wrap items-start justify-between gap-2"><span className="min-w-0 break-words text-sm font-bold">{task.title}</span><span className="shrink-0 text-xs font-semibold">{task.dueDate}</span></div>
-                        <p className="mt-1 break-words text-xs">{task.projectName} · {task.assignedToName}</p>
-                        <p className="mt-1 text-xs">{task.status} · {task.priority}</p>
+                        <p className="mt-1 break-words text-xs">{task.projectName} Â· {task.assignedToName}</p>
+                        <p className="mt-1 text-xs">{task.status} Â· {task.priority}</p>
                       </button>
                     ))}
                   </div>
@@ -2850,7 +2911,7 @@ export default function App() {
                           <div key={project.id}>
                             <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
                               <span className="font-semibold text-slate-800 truncate">{project.name}</span>
-                              <span className="shrink-0 text-slate-500">{project.targetDate || "No deadline"} · {project.progressPercent || 0}%</span>
+                              <span className="shrink-0 text-slate-500">{project.targetDate || "No deadline"} Â· {project.progressPercent || 0}%</span>
                             </div>
                             <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
                               <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${Math.min(100, project.progressPercent || 0)}%` }} />
@@ -2867,8 +2928,8 @@ export default function App() {
                         {workloadData.map((member) => (
                           <div key={member.userId}>
                             <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
-                              <span className="font-semibold text-slate-800 truncate">{member.name} · {member.teamName || "No team"}</span>
-                              <span className="shrink-0 text-slate-500">{member.totalTasks} tasks · {member.overdueTasks} overdue</span>
+                              <span className="font-semibold text-slate-800 truncate">{member.name} Â· {member.teamName || "No team"}</span>
+                              <span className="shrink-0 text-slate-500">{member.totalTasks} tasks Â· {member.overdueTasks} overdue</span>
                             </div>
                             <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
                               <div className={`h-full rounded-full ${member.overdueTasks > 0 ? "bg-rose-500" : "bg-teal-500"}`} style={{ width: `${Math.max(2, Math.round((member.totalTasks / maxTeamTasks) * 100))}%` }} />
@@ -2991,7 +3052,7 @@ export default function App() {
                                   <Link className="w-3 h-3" /> Repo Link
                                 </a>
                               ) : (
-                                <span className="text-slate-400">—</span>
+                                <span className="text-slate-400">â€”</span>
                               )}
                             </td>
                           </tr>
@@ -3022,15 +3083,15 @@ export default function App() {
                       </h3>
                       <div className="bg-slate-900 text-emerald-400 p-4 rounded-xl font-mono text-xs overflow-x-auto">
                         <pre>{`[Backlog / Unscheduled]
-         ↓
+         â†“
     [To Do (Ready)]
-         ↓
-  [In Progress (Working)] ←── Changes Requested
-         ↓                           │
- [In Review (Submitted)]             │
-         ↓                           │
- [Reviewer Review] ──────────────────┘
-         ↓ (Approved)
+         â†“
+  [In Progress (Working)] â†â”€â”€ Changes Requested
+         â†“                           â”‚
+ [In Review (Submitted)]             â”‚
+         â†“                           â”‚
+ [Reviewer Review] â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+         â†“ (Approved)
    [Completed]`}</pre>
                       </div>
                       <p className="text-xs text-slate-600">
@@ -3045,18 +3106,18 @@ export default function App() {
                       </h3>
                       <div className="bg-slate-900 text-emerald-300 p-4 rounded-xl font-mono text-xs overflow-x-auto">
                         <pre>{`Admin (Organization-Wide)
-  ├── Governance, Team Config & Permissions
-  └── System-Level Oversight
+  â”œâ”€â”€ Governance, Team Config & Permissions
+  â””â”€â”€ System-Level Oversight
 
 Team Leads / Managers (Shivam, Animesh)
-  ├── Defines Objectives, Creates & Assigns Tasks
-  ├── Monitors Deadlines, Capacity & Workload
-  └── Reviews Deliverables & Reports Status
+  â”œâ”€â”€ Defines Objectives, Creates & Assigns Tasks
+  â”œâ”€â”€ Monitors Deadlines, Capacity & Workload
+  â””â”€â”€ Reviews Deliverables & Reports Status
 
 Employees / Contributors (Sakshi, Vaibhav, Suraj)
-  ├── Acknowledges Tasks & Starts Work
-  ├── Updates Status, Records Blockers
-  └── Submits Deliverables & Daily Reports`}</pre>
+  â”œâ”€â”€ Acknowledges Tasks & Starts Work
+  â”œâ”€â”€ Updates Status, Records Blockers
+  â””â”€â”€ Submits Deliverables & Daily Reports`}</pre>
                       </div>
                       <p className="text-xs text-slate-600">
                         Server-side authorization enforces that only authorized personas can assign work, adjust ownership, or bypass review stages.
@@ -3089,6 +3150,11 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 </span>
               </div>
               <div className="flex items-center gap-2">
+                {canEditTask(selectedTask) && (
+                  <button type="button" onClick={() => handleOpenEditTask(selectedTask)} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50">
+                    <Pencil className="h-4 w-4" /> Edit task
+                  </button>
+                )}
                 {canRemoveTask(selectedTask) && (
                   <button
                     type="button"
@@ -3348,6 +3414,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Project *</label>
                   <select
+                    disabled={role === "Individual"}
                     value={taskFormData.projectId}
                     onChange={(e) => setTaskFormData({ ...taskFormData, projectId: Number(e.target.value) })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg outline-none bg-white font-medium"
@@ -3363,6 +3430,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Primary Assignee (Employee) *</label>
                   <select
+                    disabled={role === "Individual"}
                     value={taskFormData.assignedToUserId}
                     onChange={(e) => setTaskFormData({ ...taskFormData, assignedToUserId: Number(e.target.value) })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg outline-none bg-white font-medium"
@@ -3380,6 +3448,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Reviewer</label>
                   <select
+                    disabled={role === "Individual"}
                     value={taskFormData.reviewerUserId || ""}
                     onChange={(e) =>
                       setTaskFormData({
@@ -3449,6 +3518,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Estimated Effort (Hours)</label>
                   <input
+                    disabled={role === "Individual"}
                     type="number"
                     min="1"
                     value={taskFormData.estimatedHours}
@@ -3470,7 +3540,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                   type="submit"
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg shadow-sm"
                 >
-                  Assign Task
+                  {editingTaskId ? "Save Changes" : "Assign Task"}
                 </button>
               </div>
             </form>
@@ -3794,10 +3864,10 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                   <input
                     type={showUserPassword ? "text" : "password"}
                     required
-                    minLength={12}
-                    maxLength={128}
+                    minLength={7}
+                    maxLength={8}
                     autoComplete="new-password"
-                    placeholder="Min. 12 characters"
+                    placeholder="7â€“8 characters"
                     value={userFormData.password}
                     onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
                     className="w-full px-3 py-2 pr-10 border border-slate-200 rounded-lg"
@@ -3811,7 +3881,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                     <Eye className="h-4 w-4" />
                   </button>
                 </div>
-                <p className="mt-1 text-[11px] text-slate-500">12–128 characters with at least one letter and one number.</p>
+                <p className="mt-1 text-[11px] text-slate-500">7-8 characters with at least one letter and one number.</p>
               </div>
               <div className="flex items-center gap-2">
                 <input
@@ -3946,7 +4016,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 >
                   <option value="">Select an active teammate</option>
                   {deactivationReplacementUsers.map((user) => (
-                    <option key={user.id} value={user.id}>{user.name} · {user.role}</option>
+                    <option key={user.id} value={user.id}>{user.name} Â· {user.role}</option>
                   ))}
                 </select>
               </div>

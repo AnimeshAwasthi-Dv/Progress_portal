@@ -33,6 +33,7 @@ export type User = {
   designation: string;
   avatarUrl?: string | null;
   isActive: boolean;
+  isHiddenFromAdmin?: boolean;
   mustChangePassword: boolean;
   teamId?: number | null;
   teamName?: string | null;
@@ -334,6 +335,7 @@ export async function initializeDatabase() {
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS password_reset_required BOOLEAN NOT NULL DEFAULT true;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS hidden_from_admin BOOLEAN NOT NULL DEFAULT false;
       ALTER TABLE users ALTER COLUMN password_hash DROP DEFAULT;
     `);
     await client.query(`
@@ -592,8 +594,8 @@ export async function initializeDatabase() {
     const usersCount = await client.query<{ count: string }>("SELECT COUNT(*) FROM users");
     if (Number(usersCount.rows[0].count) === 0) {
       const initialAdminPassword = process.env.INITIAL_ADMIN_PASSWORD;
-      if (!initialAdminPassword || initialAdminPassword.length < 12) {
-        throw new Error("Set INITIAL_ADMIN_PASSWORD (at least 12 characters) before initializing an empty database.");
+      if (!initialAdminPassword || initialAdminPassword.length < 7 || initialAdminPassword.length > 8 || !/[A-Za-z]/.test(initialAdminPassword) || !/\d/.test(initialAdminPassword)) {
+        throw new Error("Set INITIAL_ADMIN_PASSWORD to 7-8 characters with at least one letter and one number before initializing an empty database.");
       }
 
       const teamRes = await client.query<{ id: number; name: string }>(
@@ -657,6 +659,7 @@ export async function listUsers(viewer?: AccessUser) {
       u.designation,
       u.avatar_url AS "avatarUrl",
       u.is_active AS "isActive",
+      u.hidden_from_admin AS "isHiddenFromAdmin",
       u.password_reset_required AS "mustChangePassword",
       u.team_id AS "teamId",
       t.name AS "teamName",
@@ -682,6 +685,7 @@ export async function getUserById(id: number) {
       u.designation,
       u.avatar_url AS "avatarUrl",
       u.is_active AS "isActive",
+      u.hidden_from_admin AS "isHiddenFromAdmin",
       u.password_reset_required AS "mustChangePassword",
       u.team_id AS "teamId",
       t.name AS "teamName",
@@ -692,6 +696,14 @@ export async function getUserById(id: number) {
     WHERE u.id = $1
   `, [id]);
   return rows[0] ?? null;
+}
+
+export async function hideInactiveUserProfile(id: number) {
+  const result = await pool.query(
+    "UPDATE users SET hidden_from_admin = true, updated_at = NOW() WHERE id = $1 AND role = 'Individual' AND is_active = false",
+    [id],
+  );
+  return (result.rowCount ?? 0) > 0;
 }
 
 export async function authenticateUser(identifier: string, password: string) {
@@ -1421,24 +1433,6 @@ export async function deleteTaskForUser(id: number, viewer: AccessUser) {
 
   if (viewer.role === "Admin") {
     const result = await pool.query("DELETE FROM tasks WHERE id = $1", [id]);
-    return (result.rowCount ?? 0) > 0;
-  }
-
-  if (viewer.role === "Individual") {
-    const result = await pool.query(
-      "DELETE FROM tasks WHERE id = $1 AND assigned_to_user_id = $2",
-      [id, viewer.id],
-    );
-    return (result.rowCount ?? 0) > 0;
-  }
-
-  if (viewer.role === "Team Lead") {
-    const scope = projectVisibilityClause(viewer, "p", 2);
-    const result = await pool.query(`
-      DELETE FROM tasks t
-      USING projects p
-      WHERE t.id = $1 AND p.id = t.project_id AND ${scope.sql}
-    `, [id, ...scope.values]);
     return (result.rowCount ?? 0) > 0;
   }
 
