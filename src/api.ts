@@ -363,6 +363,10 @@ export function getCurrentUser() {
   return request<User>("/api/auth/me");
 }
 
+export function getSessionUser() {
+  return request<User | null>("/api/auth/session");
+}
+
 export function getUsers() {
   return request<User[]>("/api/users");
 }

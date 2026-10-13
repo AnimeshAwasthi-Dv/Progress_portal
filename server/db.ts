@@ -1,5 +1,6 @@
 import "dotenv/config";
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import { Pool } from "pg";
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -54,16 +55,18 @@ export type Team = {
   updatedAt: string;
 };
 
-function hashPassword(password: string, salt = randomBytes(16)) {
-  return `scrypt$${salt.toString("hex")}$${scryptSync(password, salt, 64).toString("hex")}`;
+const scryptAsync = promisify(scrypt);
+
+async function hashPassword(password: string, salt = randomBytes(16)) {
+  return `scrypt$${salt.toString("hex")}$${((await scryptAsync(password, salt, 64)) as Buffer).toString("hex")}`;
 }
 
-function verifyPassword(password: string, storedHash: string) {
+async function verifyPassword(password: string, storedHash: string) {
   const [algorithm, saltHex, hashHex] = storedHash.split("$");
   if (algorithm !== "scrypt" || !saltHex || !hashHex) return false;
   const salt = Buffer.from(saltHex, "hex");
   const expected = Buffer.from(hashHex, "hex");
-  const actual = scryptSync(password, salt, expected.length);
+  const actual = await scryptAsync(password, salt, expected.length) as Buffer;
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
@@ -362,7 +365,7 @@ export async function initializeDatabase() {
     for (const legacyUser of legacyPasswords.rows) {
       await client.query(
         "UPDATE users SET password_hash = $2, password_reset_required = true WHERE id = $1",
-        [legacyUser.id, hashPassword("password123")],
+        [legacyUser.id, await hashPassword("password123")],
       );
     }
 
@@ -574,6 +577,13 @@ export async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_daily_reports_user_date ON daily_progress_reports(user_id, report_date);
       CREATE INDEX IF NOT EXISTS idx_daily_reports_project_id ON daily_progress_reports(project_id);
       CREATE INDEX IF NOT EXISTS idx_project_activity_project_id ON project_activity_history(project_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_users_login_email ON users(lower(email)) WHERE is_active = true;
+      CREATE INDEX IF NOT EXISTS idx_collaborators_user_task ON task_collaborators(user_id, task_id);
+      CREATE INDEX IF NOT EXISTS idx_notifications_user_recent ON notifications(user_id, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_daily_reports_date_name ON daily_progress_reports(report_date, employee_name);
+      CREATE INDEX IF NOT EXISTS idx_subtasks_task ON subtasks(task_id);
+      CREATE INDEX IF NOT EXISTS idx_comments_task_recent ON task_comments(task_id, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_reviews_task_recent ON task_reviews(task_id, id DESC);
     `);
 
     await client.query(`
@@ -609,7 +619,7 @@ export async function initializeDatabase() {
         `INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
          VALUES ('Admin', 'admin', 'admin@taskmanager.internal', $1, true, 'Admin', 'Executive', 'System Administrator', $2)
          RETURNING id`,
-        [hashPassword(initialAdminPassword), technicalTeam!.id],
+        [await hashPassword(initialAdminPassword), technicalTeam!.id],
       );
       await client.query("UPDATE teams SET manager_id = $1 WHERE id = $2", [admin.rows[0].id, technicalTeam!.id]);
       await client.query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2)", [technicalTeam!.id, admin.rows[0].id]);
@@ -715,9 +725,9 @@ export async function authenticateUser(identifier: string, password: string) {
   const account = rows[0];
   if (!account) return null;
 
-  let valid = verifyPassword(password, account.passwordHash);
+  let valid = await verifyPassword(password, account.passwordHash);
   if (!valid && account.passwordHash === "password123" && password === "password123") {
-    const migratedHash = hashPassword(password);
+    const migratedHash = await hashPassword(password);
     await pool.query(
       "UPDATE users SET password_hash = $2, password_reset_required = true WHERE id = $1",
       [account.id, migratedHash],
@@ -738,13 +748,28 @@ export async function createAuthSession(userId: number) {
 }
 
 export async function getUserForSession(token: string) {
-  const { rows } = await pool.query<{ userId: number }>(`
-    SELECT s.user_id AS "userId"
-    FROM auth_sessions s
-    JOIN users u ON u.id = s.user_id
+  const { rows } = await pool.query<User>(`
+    SELECT
+      u.id,
+      u.name,
+      u.username,
+      u.email,
+      u.role,
+      u.department,
+      u.designation,
+      u.avatar_url AS "avatarUrl",
+      u.is_active AS "isActive",
+      u.password_reset_required AS "mustChangePassword",
+      u.team_id AS "teamId",
+      t.name AS "teamName",
+      u.created_at AS "createdAt",
+      u.updated_at AS "updatedAt"
+    FROM users u
+    LEFT JOIN teams t ON u.team_id = t.id
+    JOIN auth_sessions s ON s.user_id = u.id
     WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.is_active = true
   `, [hashSessionToken(token)]);
-  return rows[0] ? getUserById(rows[0].userId) : null;
+  return rows[0] ?? null;
 }
 
 export async function revokeAuthSession(token: string) {
@@ -757,11 +782,11 @@ export async function changeUserPassword(userId: number, currentPassword: string
     [userId],
   );
   const account = rows[0];
-  if (!account || !verifyPassword(currentPassword, account.passwordHash)) return null;
+  if (!account || !(await verifyPassword(currentPassword, account.passwordHash))) return null;
 
   await pool.query(
     "UPDATE users SET password_hash = $2, password_reset_required = false, updated_at = NOW() WHERE id = $1",
-    [userId, hashPassword(newPassword)],
+    [userId, await hashPassword(newPassword)],
   );
   await pool.query("DELETE FROM auth_sessions WHERE user_id = $1 AND token_hash <> $2", [userId, hashSessionToken(sessionToken)]);
   return getUserById(userId);
@@ -1007,7 +1032,7 @@ export async function createUser(input: {
       INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
       VALUES ($1, $2, $3, $4, $9, $5, $6, $7, $8)
       RETURNING id
-    `, [input.name, input.username, input.email, hashPassword(input.password), input.role, input.department, input.designation, input.teamId || null, passwordResetRequired]);
+    `, [input.name, input.username, input.email, await hashPassword(input.password), input.role, input.department, input.designation, input.teamId || null, passwordResetRequired]);
     const userId = rows[0].id;
     if (input.teamId) {
       await client.query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", [input.teamId, userId]);
@@ -1324,18 +1349,23 @@ export async function listTasks(filters?: {
       t.blocker_reason AS "blockerReason",
       t.created_at AS "createdAt",
       t.updated_at AS "updatedAt",
-      COALESCE(ARRAY_AGG(DISTINCT tc_u.id) FILTER (WHERE tc_u.id IS NOT NULL), '{}') AS "collaboratorIds",
-      COALESCE(ARRAY_AGG(DISTINCT tc_u.name) FILTER (WHERE tc_u.name IS NOT NULL), '{}') AS "collaboratorNames"
+      collaborators.ids AS "collaboratorIds",
+      collaborators.names AS "collaboratorNames"
     FROM tasks t
     JOIN projects p ON t.project_id = p.id
     LEFT JOIN tasks pt ON t.parent_task_id = pt.id
     JOIN users u_by ON t.assigned_by_user_id = u_by.id
     JOIN users u_to ON t.assigned_to_user_id = u_to.id
     LEFT JOIN users u_rev ON t.reviewer_user_id = u_rev.id
-    LEFT JOIN task_collaborators tc ON t.id = tc.task_id
-    LEFT JOIN users tc_u ON tc.user_id = tc_u.id
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(ARRAY_AGG(DISTINCT tc_u.id) FILTER (WHERE tc_u.id IS NOT NULL), '{}') AS ids,
+        COALESCE(ARRAY_AGG(DISTINCT tc_u.name) FILTER (WHERE tc_u.name IS NOT NULL), '{}') AS names
+      FROM task_collaborators tc
+      JOIN users tc_u ON tc.user_id = tc_u.id
+      WHERE tc.task_id = t.id
+    ) collaborators ON true
     ${whereClause}
-    GROUP BY t.id, p.name, pt.title, u_by.name, u_to.name, u_rev.name
     ORDER BY t.id DESC
   `, values);
 
@@ -1950,7 +1980,13 @@ export async function getDashboardMetrics(viewer: AccessUser) {
     `SELECT COUNT(*) FROM users u WHERE u.is_active = true AND ${userScope.sql}`,
     userScope.values,
   );
-  const teamsCount = (await listTeams(viewer)).length;
+  const teamsCountRes = await pool.query<{ count: string }>(`
+    SELECT COUNT(*) FROM teams t
+    WHERE $1::integer IS NULL OR t.manager_id = $1 OR t.lead_id = $1 OR EXISTS (
+      SELECT 1 FROM team_members tm WHERE tm.team_id = t.id AND tm.user_id = $1
+    )
+  `, [viewer.role === "Admin" ? null : viewer.id]);
+  const teamsCount = Number(teamsCountRes.rows[0].count);
 
   let personalMetrics = null;
   if (viewer.id) {

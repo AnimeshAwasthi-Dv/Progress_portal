@@ -1,4 +1,5 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import Login from "./Login";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertCircle,
@@ -69,7 +70,6 @@ import {
   getTeams,
   getUsers,
   hideInactiveEmployeeProfile,
-  login,
   logout,
   markAllNotificationsRead,
   markNotificationRead,
@@ -98,7 +98,7 @@ import {
   updateTask,
 } from "./api";
 
-const companyLogo = new URL("../images/logo.png", import.meta.url).href;
+import CompanyLogo from "./CompanyLogo";
 
 // ---------------- Helper Utilities ---------------- //
 
@@ -166,9 +166,9 @@ type ViewMode =
   | "allotments"
   | "workflows";
 
-export default function App() {
+export default function App({ initialUser }: { initialUser: AppUser }) {
   // Application State
-  const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
+  const [currentUser, setCurrentUser] = useState<AppUser | null>(initialUser);
   const [usersList, setUsersList] = useState<AppUser[]>([]);
   const [teamsList, setTeamsList] = useState<Team[]>([]);
   const [projectsList, setProjectsList] = useState<Project[]>([]);
@@ -188,12 +188,9 @@ export default function App() {
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [loginIdentifier, setLoginIdentifier] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showUserPassword, setShowUserPassword] = useState(false);
 
@@ -302,20 +299,21 @@ export default function App() {
   });
 
   // Initial Data Fetch
-  const refreshAllData = async () => {
+  const refreshAllData = async (knownUser?: AppUser) => {
     const generation = ++dataRefreshGeneration.current;
     try {
-      const u = await getCurrentUser();
+      const u = knownUser ?? await getCurrentUser();
       if (generation !== dataRefreshGeneration.current) return;
       setCurrentUser(u);
       // Show the authenticated workspace as soon as identity is known. Its
       // independent sections can fill in as their own authorized requests finish.
       setIsLoading(false);
 
+      const sectionUpdates: Array<() => void> = [];
       const loadSection = async <T,>(promise: Promise<T>, apply: (data: T) => void) => {
         try {
           const data = await promise;
-          if (generation === dataRefreshGeneration.current) apply(data);
+          sectionUpdates.push(() => apply(data));
         } catch (err: any) {
           if (generation === dataRefreshGeneration.current) {
             if (err.message?.includes("sign in") || err.message?.includes("session has expired")) {
@@ -335,13 +333,15 @@ export default function App() {
         loadSection(getProjects(), setProjectsList),
         loadSection(getTasks(), setTasksList),
         loadSection(getDashboardMetrics(), setMetrics),
-        loadSection(getTeamWorkloadAnalytics(), setWorkloadData),
+        ...(currentView === "workload" || currentView === "analytics"
+          ? [loadSection(getTeamWorkloadAnalytics(), setWorkloadData)] : []),
         loadSection(getNotifications(), setNotifications),
-        loadSection(
-          u.role === "Admin" ? getProjectAllotments() : Promise.resolve([] as ProjectAllotment[]),
-          setAllotments,
-        ),
+        ...(u.role === "Admin" && currentView === "allotments"
+          ? [loadSection(getProjectAllotments(), setAllotments)] : []),
       ]);
+      // React batches these updates into one commit, avoiding a layout pass for
+      // each independent network response. Never apply a previous session's data.
+      if (generation === dataRefreshGeneration.current) sectionUpdates.forEach((apply) => apply());
     } catch (err: any) {
       if (generation !== dataRefreshGeneration.current) return;
       if (err.message?.includes("sign in") || err.message?.includes("session has expired")) {
@@ -356,7 +356,7 @@ export default function App() {
   };
 
   useEffect(() => {
-    refreshAllData();
+    refreshAllData(initialUser);
   }, []);
 
   useEffect(() => {
@@ -371,10 +371,25 @@ export default function App() {
   // Fetch daily reports when reportDate changes
   useEffect(() => {
     if (!currentUser) return;
+    let active = true;
+    const fail = (error: Error) => { if (active) setErrorMessage(error.message); };
+    if (currentView === "workload" || currentView === "analytics") {
+      getTeamWorkloadAnalytics().then((data) => { if (active) setWorkloadData(data); }).catch(fail);
+    }
+    if (currentView === "allotments" && currentUser.role === "Admin") {
+      getProjectAllotments().then((data) => { if (active) setAllotments(data); }).catch(fail);
+    }
+    return () => { active = false; };
+  }, [currentView, currentUser?.id, currentUser?.role]);
+
+  useEffect(() => {
+    if (!currentUser || currentView !== "daily-reports") return;
+    let active = true;
     getDailyProgressReports(reportDate)
-      .then((reports) => setDailyReports(reports))
-      .catch((e) => console.error(e));
-  }, [reportDate, currentUser]);
+      .then((reports) => { if (active) setDailyReports(reports); })
+      .catch((e) => { if (active) setErrorMessage(e.message); });
+    return () => { active = false; };
+  }, [reportDate, currentUser?.id, currentView]);
 
   // Load Task Details when selectedTaskId changes
   useEffect(() => {
@@ -382,6 +397,7 @@ export default function App() {
       setSelectedTask(null);
       return;
     }
+    let active = true;
     Promise.all([
       getTaskById(selectedTaskId),
       getTaskComments(selectedTaskId),
@@ -389,28 +405,15 @@ export default function App() {
       getTaskReviews(selectedTaskId),
     ])
       .then(([t, c, a, r]) => {
+        if (!active) return;
         setSelectedTask(t);
         setTaskComments(c);
         setTaskActivities(a);
         setTaskReviews(r);
       })
-      .catch((e) => setErrorMessage(e.message));
+      .catch((e) => { if (active) setErrorMessage(e.message); });
+    return () => { active = false; };
   }, [selectedTaskId]);
-
-  const handleLoginSubmit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setErrorMessage("");
-    setIsLoading(true);
-    try {
-      const user = await login(loginIdentifier.trim(), loginPassword);
-      await refreshAllData();
-      if (!user.mustChangePassword) setLoginPassword("");
-      setLoginIdentifier("");
-    } catch (error: any) {
-      setIsLoading(false);
-      setErrorMessage(error.message || "Unable to sign in.");
-    }
-  };
 
   const handlePasswordChangeSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -513,7 +516,7 @@ export default function App() {
   const calendarHeading = calendarMode === "Day"
     ? calendarDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })
     : calendarMode === "Week"
-      ? `${calendarPeriodStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} â€“ ${shiftDate(calendarPeriodStart, 6).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
+      ? `${calendarPeriodStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${shiftDate(calendarPeriodStart, 6).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
       : calendarDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 
   const calendarTaskTone = (task: Task) => {
@@ -558,20 +561,12 @@ export default function App() {
 
   const handleOpenEditTask = (task: Task) => {
     setTaskFormData({
-      title: task.title,
-      description: task.description || "",
-      projectId: task.projectId,
-      assignedToUserId: task.assignedToUserId,
-      reviewerUserId: task.reviewerUserId,
-      priority: task.priority,
-      status: task.status,
-      startDate: task.startDate || "",
-      dueDate: task.dueDate || "",
-      estimatedHours: task.estimatedHours || 0,
-      acceptanceCriteria: task.acceptanceCriteria || "",
-      repositoryUrl: task.repositoryUrl || "",
-      pullRequestUrl: task.pullRequestUrl || "",
-      collaboratorIds: task.collaboratorIds || [],
+      title: task.title, description: task.description || "", projectId: task.projectId,
+      assignedToUserId: task.assignedToUserId, reviewerUserId: task.reviewerUserId,
+      priority: task.priority, status: task.status, startDate: task.startDate || "",
+      dueDate: task.dueDate || "", estimatedHours: task.estimatedHours || 0,
+      acceptanceCriteria: task.acceptanceCriteria || "", repositoryUrl: task.repositoryUrl || "",
+      pullRequestUrl: task.pullRequestUrl || "", collaboratorIds: task.collaboratorIds || [],
     });
     setEditingTaskId(task.id);
     setIsTaskModalOpen(true);
@@ -950,142 +945,14 @@ export default function App() {
     .sort((left, right) => (left.dueDate || "9999-12-31").localeCompare(right.dueDate || "9999-12-31"))
     .slice(0, 5);
 
-  if (!isLoading && !currentUser) {
-    return (
-      <main className="min-h-screen font-sans grid lg:grid-cols-[minmax(0,1fr)_minmax(400px,520px)]">
-        {/* Left panel â€” purple/indigo gradient */}
-        <section className="hidden lg:flex flex-col justify-between p-12 text-white relative overflow-hidden"
-          style={{ background: "linear-gradient(135deg, #312e81 0%, #4338ca 40%, #6366f1 70%, #818cf8 100%)" }}>
-          {/* decorative blobs */}
-          <div className="absolute -top-20 -right-20 w-72 h-72 rounded-full opacity-20" style={{ background: "radial-gradient(circle, #a5b4fc, transparent)" }} />
-          <div className="absolute bottom-10 -left-16 w-56 h-56 rounded-full opacity-15" style={{ background: "radial-gradient(circle, #c7d2fe, transparent)" }} />
-
-         
-<div className="relative flex items-center gap-6">
-  <img
-    src={companyLogo}
-    alt="Dectrocel logo"
-    className="h-24 w-24 shrink-0 rounded-2xl bg-white p-2 object-contain shadow-xl"
-  />
-  <div>
-    <p className="text-4xl font-extrabold tracking-tight">
-      Dectrocel
-    </p>
-    <p className="mt-1 text-sm font-bold uppercase tracking-[0.2em] text-indigo-200">
-      Healthcare and Research
-    </p>
-  </div>
-</div>
-
-
-         
-<div className="relative max-w-2xl">
-  <span className="mb-4 inline-block text-sm font-bold uppercase tracking-[0.2em] text-indigo-300">
-    DecTrack
-  </span>
-
-  <h1 className="text-5xl font-black leading-tight tracking-tight xl:text-6xl">
-    One workspace for the teams moving care forward.
-  </h1>
-
-  <p className="mt-5 max-w-xl text-lg leading-relaxed text-indigo-100">
-    Sign in with the username or email provided by your administrator.
-  </p>
-
-  <div className="mt-8 flex flex-wrap gap-6 text-sm font-semibold text-indigo-200">
-    <span>ðŸ”’ Secure sessions</span>
-    <span>ðŸ¥ Healthcare grade</span>
-    <span>âš¡ Real-time sync</span>
-  </div>
-</div>
-
-
-          <p className="relative text-xs text-indigo-300">Â© {new Date().getFullYear()} Dectrocel Healthcare and Research</p>
-        </section>
-
-        {/* Right panel â€” form */}
-        <section className="flex min-h-screen items-center justify-center bg-slate-50 p-6 sm:p-10">
-          <div className="w-full max-w-sm">
-            {/* Mobile logo */}
-            <div className="mb-8 flex items-center gap-3 lg:hidden">
-              <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 rounded-xl object-contain shadow" />
-              <div>
-                <p className="font-extrabold text-slate-900">Dectrocel</p>
-                <p className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest">Healthcare and Research</p>
-              </div>
-            </div>
-
-            <span className="inline-block text-xs font-bold uppercase tracking-widest text-indigo-600 mb-2">Secure sign in</span>
-            <h1 className="text-2xl font-black text-slate-900">Welcome back</h1>
-            <p className="mt-2 text-sm text-slate-500">Use your assigned username or work email.</p>
-
-            {errorMessage && (
-              <p role="alert" className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
-                {errorMessage}
-              </p>
-            )}
-
-            <form onSubmit={handleLoginSubmit} className="mt-6 space-y-4">
-              <div>
-                <label htmlFor="login-identifier" className="mb-1.5 block text-sm font-semibold text-slate-700">
-                  Username or email
-                </label>
-                <input
-                  id="login-identifier"
-                  autoComplete="username"
-                  required
-                  value={loginIdentifier}
-                  onChange={(e) => setLoginIdentifier(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-                  placeholder="e.g. animesh3"
-                />
-              </div>
-              <div>
-                <label htmlFor="login-password" className="mb-1.5 block text-sm font-semibold text-slate-700">
-                  Password
-                </label>
-                <div className="relative">
-                  <input
-                    id="login-password"
-                    type={showLoginPassword ? "text" : "password"}
-                    autoComplete="current-password"
-                    required
-                    value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
-                    className="w-full rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 pr-11 text-sm outline-none transition focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
-                    placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢"
-                  />
-                  <button
-                    type="button"
-                    aria-label={showLoginPassword ? "Hide password" : "Show password"}
-                    onClick={() => setShowLoginPassword((v) => !v)}
-                    className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700"
-                  >
-                    <Eye className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-              <button
-                type="submit"
-                disabled={isLoading}
-                className="w-full rounded-xl py-2.5 text-sm font-bold text-white transition disabled:opacity-60"
-                style={{ background: "linear-gradient(135deg, #4338ca, #6366f1)" }}
-              >
-                {isLoading ? "Signing inâ€¦" : "Sign in"}
-              </button>
-            </form>
-          </div>
-        </section>
-      </main>
-    );
-  }
+  if (!isLoading && !currentUser) return <Login onAuthenticated={() => { void refreshAllData(); }} />;
 
   if (!isLoading && currentUser?.mustChangePassword) {
     return (
       <main className="min-h-screen bg-slate-50 font-sans flex items-center justify-center p-6">
         <section className="w-full max-w-md rounded-2xl border border-indigo-100 bg-white p-8 shadow-lg">
           <div className="mb-6 flex items-center gap-3">
-            <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 rounded-xl object-contain shadow" />
+            <CompanyLogo className="h-12 w-12 rounded-xl object-contain shadow" />
             <div>
               <p className="font-extrabold text-slate-900">Dectrocel</p>
               <p className="text-[10px] font-bold uppercase text-indigo-600 tracking-widest">Healthcare and Research</p>
@@ -1104,9 +971,9 @@ export default function App() {
               <label htmlFor="new-password" className="mb-1.5 block text-sm font-semibold text-slate-700">New password</label>
               <div className="relative">
                 <input id="new-password" type={showNewPassword ? "text" : "password"} minLength={7} maxLength={8} autoComplete="new-password" required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 pr-11 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
-                <button type="button" aria-label={showNewPassword ? "Hide" : "Show"} onClick={() => setShowNewPassword((v) => !v)} className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700"><Eye className="h-4 w-4" /></button>
+                <button type="button" aria-label={showNewPassword ? "Hide" : "Show"} onClick={() => setShowNewPassword((v) => !v)} className="absolute inset-y-0 right-0 px-3 text-slate-600 hover:text-slate-700"><Eye className="h-4 w-4" /></button>
               </div>
-              <p className="mt-1 text-xs text-slate-500">7-8 characters with at least one letter and one number.</p>
+              <p className="mt-1 text-xs text-slate-500">7–8 characters with at least one letter and one number.</p>
             </div>
             <div>
               <label htmlFor="confirm-password" className="mb-1.5 block text-sm font-semibold text-slate-700">Confirm new password</label>
@@ -1148,7 +1015,7 @@ export default function App() {
             </div>
             <span className="min-w-0 max-w-[4.5rem] truncate font-bold text-indigo-900 sm:max-w-40">{currentUser?.name}</span>
             <span className="hidden shrink-0 text-indigo-700 sm:inline">{currentUser?.role}</span>
-            <button onClick={handleLogout} className="ml-0.5 flex shrink-0 items-center gap-1 text-rose-600 font-bold hover:text-rose-800 transition" aria-label="Sign out">
+            <button onClick={handleLogout} className="ml-0.5 flex shrink-0 items-center gap-1 text-rose-700 font-bold hover:text-rose-800 transition" aria-label="Sign out">
               <Shield className="w-3 h-3" />
               <span className="hidden sm:inline">Sign out</span>
             </button>
@@ -1188,7 +1055,7 @@ export default function App() {
                 </div>
                 <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto mt-2">
                   {notifications.length === 0 ? (
-                    <div className="text-center py-6 text-slate-400 text-xs">No notifications.</div>
+                    <div className="text-center py-6 text-slate-600 text-xs">No notifications.</div>
                   ) : (
                     notifications.map((n) => (
                       <div
@@ -1209,7 +1076,7 @@ export default function App() {
                       >
                         <div className="flex items-center justify-between mb-1">
                           <span className="font-bold text-slate-800">{n.title}</span>
-                          <span className="text-[10px] text-slate-400">
+                          <span className="text-[10px] text-slate-600">
                             {new Date(n.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                           </span>
                         </div>
@@ -1237,24 +1104,24 @@ export default function App() {
 
       {/* Global Alerts */}
       {errorMessage && (
-        <div className="min-w-0 bg-rose-50 border-l-4 border-rose-500 p-3 mx-4 lg:ml-72 lg:mr-8 mt-4 rounded-r-lg flex items-start justify-between gap-3 text-rose-800 text-xs sm:text-sm animate-in fade-in">
-          <div className="flex min-w-0 items-start gap-2">
+        <div className="bg-rose-50 border-l-4 border-rose-500 p-3 mx-4 lg:mx-8 mt-4 rounded-r-lg flex items-center justify-between text-rose-800 text-xs sm:text-sm animate-in fade-in">
+          <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
-            <span className="min-w-0 whitespace-normal break-words">{errorMessage}</span>
+            <span>{errorMessage}</span>
           </div>
-          <button onClick={() => setErrorMessage("")} className="shrink-0 hover:text-rose-950 font-bold p-1">
+          <button onClick={() => setErrorMessage("")} className="hover:text-rose-950 font-bold p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
       {successMessage && (
-        <div className="min-w-0 bg-emerald-50 border-l-4 border-emerald-500 p-3 mx-4 lg:ml-72 lg:mr-8 mt-4 rounded-r-lg flex items-start justify-between gap-3 text-emerald-800 text-xs sm:text-sm animate-in fade-in">
-          <div className="flex min-w-0 items-start gap-2">
+        <div className="bg-emerald-50 border-l-4 border-emerald-500 p-3 mx-4 lg:mx-8 mt-4 rounded-r-lg flex items-center justify-between text-emerald-800 text-xs sm:text-sm animate-in fade-in">
+          <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
-            <span className="min-w-0 whitespace-normal break-words">{successMessage}</span>
+            <span>{successMessage}</span>
           </div>
-          <button onClick={() => setSuccessMessage("")} className="shrink-0 hover:text-emerald-950 font-bold p-1">
+          <button onClick={() => setSuccessMessage("")} className="hover:text-emerald-950 font-bold p-1">
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -1272,7 +1139,7 @@ export default function App() {
           }`}
         >
           <div className="min-h-[72px] shrink-0 border-b border-slate-100 px-3 py-2 flex items-center gap-2.5">
-            <img src={companyLogo} alt="Dectrocel logo" className="h-12 w-12 shrink-0 object-contain rounded-lg" />
+            <CompanyLogo className="h-12 w-12 shrink-0 object-contain rounded-lg" />
             <div className="min-w-0 leading-tight">
               <p className="text-sm font-extrabold text-slate-900">Dectrocel</p>
               <p className="text-[10px] font-bold uppercase text-indigo-600">Healthcare and Research</p>
@@ -1281,7 +1148,7 @@ export default function App() {
           </div>
 
           <nav className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 space-y-1 text-xs sm:text-sm font-medium">
-            <p className="px-3 pt-2 pb-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+            <p className="px-3 pt-2 pb-1 text-[11px] font-bold text-slate-600 uppercase tracking-wider">
               Workspace Views
             </p>
             <button
@@ -1443,7 +1310,7 @@ export default function App() {
               <span>Daily Reports</span>
             </button>
 
-            <p className="px-3 pt-4 pb-1 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+            <p className="px-3 pt-4 pb-1 text-[11px] font-bold text-slate-600 uppercase tracking-wider">
               Organization Governance
             </p>
 
@@ -1528,7 +1395,7 @@ export default function App() {
         {/* Content Viewport */}
         <main className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6 lg:p-8 lg:ml-64 font-sans">
           {isLoading ? (
-            <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+            <div className="flex flex-col items-center justify-center py-20 text-slate-600">
               <RefreshCw className="w-8 h-8 animate-spin text-emerald-600 mb-3" />
               <p className="text-sm font-medium">Synchronizing Dectrocel database...</p>
             </div>
@@ -1544,7 +1411,7 @@ export default function App() {
                         <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs px-2.5 py-0.5 rounded-full font-bold">
                           {currentUser?.role === "Admin" ? "Admin Console" : `${currentUser?.name} (${currentUser?.role})`}
                         </span>
-                        <span className="text-emerald-200/70 text-xs">â€¢ Connected to PostgreSQL Database</span>
+                        <span className="text-emerald-200/70 text-xs">• Connected to PostgreSQL Database</span>
                       </div>
                       <h1 className="text-xl sm:text-2xl font-black font-display tracking-tight">
                         DecTrack
@@ -1562,7 +1429,7 @@ export default function App() {
                       {canAssignTasks && (
                         <button
                           onClick={handleOpenCreateTask}
-                          className="bg-emerald-500 hover:bg-emerald-400 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl shadow-sm transition flex items-center gap-1.5"
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl shadow-sm transition flex items-center gap-1.5"
                         >
                           <Plus className="w-4 h-4" />
                           New Assignment
@@ -1646,7 +1513,7 @@ export default function App() {
                           <button key={task.id} onClick={() => setSelectedTaskId(task.id)} className="w-full py-2.5 text-left flex items-center justify-between gap-4 hover:bg-amber-50/40">
                             <span className="min-w-0">
                               <span className="block text-sm font-semibold text-slate-900 truncate">{task.title}</span>
-                              <span className="text-xs text-slate-500">{task.taskCode} Â· {task.projectName}</span>
+                              <span className="text-xs text-slate-500">{task.taskCode} · {task.projectName}</span>
                             </span>
                             <span className={`shrink-0 text-xs font-bold ${task.status === "Blocked" ? "text-rose-700" : "text-amber-700"}`}>
                               {task.status === "Blocked" ? "Blocked" : `Due ${task.dueDate}`}
@@ -1702,7 +1569,7 @@ export default function App() {
                                   </div>
                                   <p className="font-semibold text-sm text-slate-900 truncate">{task.title}</p>
                                   <p className="text-xs text-slate-500 mt-0.5">
-                                    Project: <strong className="text-slate-700">{task.projectName}</strong> â€¢ Assigned to: <strong className="text-emerald-700 font-bold">{task.assignedToName}</strong>
+                                    Project: <strong className="text-slate-700">{task.projectName}</strong> • Assigned to: <strong className="text-emerald-700 font-bold">{task.assignedToName}</strong>
                                   </p>
                                 </div>
 
@@ -1815,18 +1682,18 @@ export default function App() {
                                   </p>
                                   {act.newValue && (
                                     <p className="text-slate-500 text-[11px] mt-0.5 font-mono">
-                                      {act.fieldChanged}: {act.oldValue ? `${act.oldValue} â†’ ` : ""}
+                                      {act.fieldChanged}: {act.oldValue ? `${act.oldValue} → ` : ""}
                                       {act.newValue}
                                     </p>
                                   )}
-                                  <span className="text-[10px] text-slate-400">
+                                  <span className="text-[10px] text-slate-600">
                                     {new Date(act.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                                   </span>
                                 </div>
                               </div>
                             ))
                           ) : (
-                            <p className="text-xs text-slate-400">No recent activity recorded.</p>
+                            <p className="text-xs text-slate-600">No recent activity recorded.</p>
                           )}
                         </div>
                       </div>
@@ -1864,7 +1731,7 @@ export default function App() {
                   {/* Filters Bar */}
                   <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs flex flex-wrap items-center gap-3">
                     <div className="relative flex-1 min-w-[200px]">
-                      <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <Search className="w-4 h-4 text-slate-600 absolute left-3 top-1/2 -translate-y-1/2" />
                       <input
                         type="text"
                         placeholder="Search tasks by code, title, assignee..."
@@ -1960,7 +1827,7 @@ export default function App() {
                         <tbody className="divide-y divide-slate-100 font-medium">
                           {filteredTasks.length === 0 ? (
                             <tr>
-                              <td colSpan={10} className="py-12 text-center text-slate-400">
+                              <td colSpan={10} className="py-12 text-center text-slate-600">
                                 No tasks match the selected filters.
                               </td>
                             </tr>
@@ -1988,7 +1855,7 @@ export default function App() {
                                     <span className="font-bold text-slate-900">{t.assignedToName}</span>
                                   </div>
                                 </td>
-                                <td className="py-3.5 px-4 text-slate-600">{t.reviewerName || "â€”"}</td>
+                                <td className="py-3.5 px-4 text-slate-600">{t.reviewerName || "—"}</td>
                                 <td className="py-3.5 px-4">
                                   <span className={`badge ${priorityBadgeStyles[t.priority].bg}`}>
                                     {t.priority}
@@ -2011,20 +1878,14 @@ export default function App() {
                                         e.stopPropagation();
                                         setSelectedTaskId(t.id);
                                       }}
-                                      className="p-1.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
+                                      className="p-1.5 text-slate-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
                                       aria-label={`View task ${t.taskCode}`}
                                       title="View task"
                                     >
                                       <Eye className="w-4 h-4" />
                                     </button>
                                     {canEditTask(t) && (
-                                      <button
-                                        type="button"
-                                        onClick={(e) => { e.stopPropagation(); handleOpenEditTask(t); }}
-                                        className="p-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 rounded-lg transition"
-                                        aria-label={`Edit task ${t.taskCode}`}
-                                        title="Edit task"
-                                      >
+                                      <button type="button" onClick={(e) => { e.stopPropagation(); handleOpenEditTask(t); }} className="p-1.5 text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50 rounded-lg transition" aria-label={`Edit task ${t.taskCode}`} title="Edit task">
                                         <Pencil className="w-4 h-4" />
                                       </button>
                                     )}
@@ -2115,7 +1976,7 @@ export default function App() {
                               Lead: <strong className="text-slate-800">{project.leadName || "Unassigned"}</strong>
                             </p>
                             <p>
-                              Timeline: {project.startDate || "N/A"} â†’ {project.targetDate || "N/A"}
+                              Timeline: {project.startDate || "N/A"} → {project.targetDate || "N/A"}
                             </p>
                           </div>
                         </div>
@@ -2200,9 +2061,9 @@ export default function App() {
                                       <span className="mt-0.5 block text-xs text-slate-500">{department.members.length} {department.members.length === 1 ? "member" : "members"}</span>
                                     </span>
                                   </div>
-                                  <ArrowRight className={`mt-1 h-4 w-4 transition ${isSelected ? "rotate-90 text-emerald-700" : "text-slate-400"}`} />
+                                  <ArrowRight className={`mt-1 h-4 w-4 transition ${isSelected ? "rotate-90 text-emerald-700" : "text-slate-600"}`} />
                                 </div>
-                                <p className="mt-3 text-xs text-slate-500">{activeMembers} active Â· {department.members.length - activeMembers} inactive</p>
+                                <p className="mt-3 text-xs text-slate-500">{activeMembers} active · {department.members.length - activeMembers} inactive</p>
                               </button>
                             );
                           })}
@@ -2227,7 +2088,7 @@ export default function App() {
                                     <span className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-sm font-bold text-slate-700">{initials(member.name)}</span>
                                     <div>
                                       <p className="font-bold text-sm text-slate-900">{member.name}</p>
-                                      <p className="text-xs text-slate-500">{member.designation} Â· {member.email}</p>
+                                      <p className="text-xs text-slate-500">{member.designation} · {member.email}</p>
                                     </div>
                                   </div>
                                   <div className="flex flex-wrap items-center gap-2 sm:justify-end">
@@ -2287,7 +2148,7 @@ export default function App() {
                               </div>
                               <div>
                                 <p className="font-bold text-sm text-slate-900">{admin.name}</p>
-                                <p className="text-xs text-slate-500">{admin.designation} â€¢ {admin.email}</p>
+                                <p className="text-xs text-slate-500">{admin.designation} • {admin.email}</p>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
@@ -2345,21 +2206,21 @@ export default function App() {
                                   </div>
                                 </div>
                                 <span className={`badge ${lead.isActive ? "bg-teal-50 text-teal-800" : "bg-slate-100 text-slate-500"} font-bold`}>
-                                  {lead.isActive ? lead.role : `${lead.role} Â· Inactive`}
+                                  {lead.isActive ? lead.role : `${lead.role} · Inactive`}
                                 </span>
                               </div>
 
                               <div className="grid grid-cols-3 gap-2 text-center text-xs py-2 bg-white rounded-lg border border-slate-100">
                                 <div>
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase">Managed Tasks</p>
+                                  <p className="text-[10px] text-slate-600 font-bold uppercase">Managed Tasks</p>
                                   <p className="font-bold text-slate-800 mt-0.5">{leadTasks.length}</p>
                                 </div>
                                 <div>
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase">Active</p>
+                                  <p className="text-[10px] text-slate-600 font-bold uppercase">Active</p>
                                   <p className="font-bold text-emerald-600 mt-0.5">{activeCount}</p>
                                 </div>
                                 <div>
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase">Team</p>
+                                  <p className="text-[10px] text-slate-600 font-bold uppercase">Team</p>
                                   <p className="font-bold text-slate-700 mt-0.5">{lead.teamName || "Core Systems"}</p>
                                 </div>
                               </div>
@@ -2406,7 +2267,7 @@ export default function App() {
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div className="col-span-full grid grid-cols-1 md:grid-cols-3 gap-3">
                           <div className="relative">
-                            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                            <Search className="w-4 h-4 text-slate-600 absolute left-3 top-1/2 -translate-y-1/2" />
                             <input
                               type="search"
                               aria-label="Search employees"
@@ -2453,7 +2314,7 @@ export default function App() {
                                   </div>
                                   <div>
                                     <p className="font-bold text-sm text-slate-900">{ic.name}</p>
-                                    <p className="text-[11px] text-slate-500">{ic.designation} Â· {ic.teamName || "No team"}</p>
+                                    <p className="text-[11px] text-slate-500">{ic.designation} · {ic.teamName || "No team"}</p>
                                     <p className="text-[11px] text-slate-500 truncate">{ic.email}</p>
                                   </div>
                                 </div>
@@ -2464,11 +2325,11 @@ export default function App() {
 
                               <div className="grid grid-cols-2 gap-2 text-center text-xs py-2 bg-white rounded-lg border border-slate-100">
                                 <div>
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase">Active Tasks</p>
+                                  <p className="text-[10px] text-slate-600 font-bold uppercase">Active Tasks</p>
                                   <p className="font-bold text-emerald-600 mt-0.5">{active}</p>
                                 </div>
                                 <div>
-                                  <p className="text-[10px] text-slate-400 font-bold uppercase">Completed</p>
+                                  <p className="text-[10px] text-slate-600 font-bold uppercase">Completed</p>
                                   <p className="font-bold text-slate-800 mt-0.5">{completed}</p>
                                 </div>
                               </div>
@@ -2489,13 +2350,8 @@ export default function App() {
                                   </button>
                                 )}
                                 {role === "Admin" && !ic.isActive && (
-                                  <button
-                                    type="button"
-                                    onClick={() => void handleHideInactiveProfile(ic)}
-                                    className="w-full text-xs text-rose-700 border border-rose-200 hover:bg-rose-50 font-bold py-1.5 rounded-lg transition"
-                                  >
-                                    <X className="w-3.5 h-3.5 inline mr-1" />
-                                    Remove Inactive Profile
+                                  <button type="button" onClick={() => void handleHideInactiveProfile(ic)} className="w-full text-xs text-rose-700 border border-rose-200 hover:bg-rose-50 font-bold py-1.5 rounded-lg transition">
+                                    <X className="w-3.5 h-3.5 inline mr-1" /> Remove Inactive Profile
                                   </button>
                                 )}
                               </div>
@@ -2658,7 +2514,7 @@ export default function App() {
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {dailyReports.length === 0 ? (
-                      <div className="col-span-2 bg-white rounded-xl border border-slate-200 p-12 text-center text-slate-400">
+                      <div className="col-span-2 bg-white rounded-xl border border-slate-200 p-12 text-center text-slate-600">
                         <FileSpreadsheet className="w-10 h-10 mx-auto text-slate-300 mb-2" />
                         <p className="font-semibold text-sm">No daily reports recorded for {reportDate}.</p>
                         <p className="text-xs mt-1">Be the first to submit a report for today.</p>
@@ -2676,7 +2532,7 @@ export default function App() {
                               </div>
                               <div>
                                 <h3 className="font-bold text-sm text-slate-900">{report.employeeName}</h3>
-                                <p className="text-[11px] text-slate-400">{report.reportDate}</p>
+                                <p className="text-[11px] text-slate-600">{report.reportDate}</p>
                               </div>
                             </div>
                             {report.projectName && (
@@ -2784,11 +2640,11 @@ export default function App() {
                           const inMonth = day.getMonth() === calendarDate.getMonth();
                           return (
                             <div key={key} className={`min-h-28 min-w-0 border-b border-r border-slate-100 p-1.5 ${inMonth ? "bg-white" : "bg-slate-50/70"}`}>
-                              <div className={`mb-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${key === localDateString() ? "bg-indigo-600 text-white" : inMonth ? "text-slate-700" : "text-slate-400"}`}>{day.getDate()}</div>
+                              <div className={`mb-1 flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${key === localDateString() ? "bg-indigo-600 text-white" : inMonth ? "text-slate-700" : "text-slate-600"}`}>{day.getDate()}</div>
                               <div className="space-y-1">
                                 {dayTasks.slice(0, 3).map((task) => (
-                                  <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded border px-1.5 py-1 text-left text-[10px] leading-tight ${calendarTaskTone(task)}`} title={`${task.title} Â· ${task.projectName} Â· ${task.assignedToName} Â· ${task.status} Â· ${task.priority}`}>
-                                    <span className="block truncate font-bold">{task.title}</span><span className="block truncate">{task.projectName} Â· {task.assignedToName} Â· {task.priority} Â· {task.status}</span>
+                                  <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded border px-1.5 py-1 text-left text-[10px] leading-tight ${calendarTaskTone(task)}`} title={`${task.title} · ${task.projectName} · ${task.assignedToName} · ${task.status} · ${task.priority}`}>
+                                    <span className="block truncate font-bold">{task.title}</span><span className="block truncate">{task.projectName} · {task.assignedToName} · {task.priority} · {task.status}</span>
                                   </button>
                                 ))}
                                 {dayTasks.length > 3 && <p className="px-1 text-[10px] font-semibold text-slate-500">+{dayTasks.length - 3} more</p>}
@@ -2811,8 +2667,8 @@ export default function App() {
                             <div className="space-y-2">{dayTasks.map((task) => (
                               <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded-lg border p-2 text-left ${calendarTaskTone(task)}`}>
                                 <span className="block break-words text-xs font-bold">{task.title}</span>
-                                <span className="mt-1 block break-words text-[11px]">{task.projectName} Â· {task.assignedToName}</span>
-                                <span className="mt-1 flex flex-wrap gap-1 text-[10px]"><span>{task.status}</span><span>Â· {task.priority}</span><span>Â· Due {task.dueDate}</span></span>
+                                <span className="mt-1 block break-words text-[11px]">{task.projectName} · {task.assignedToName}</span>
+                                <span className="mt-1 flex flex-wrap gap-1 text-[10px]"><span>{task.status}</span><span>· {task.priority}</span><span>· Due {task.dueDate}</span></span>
                               </button>
                             ))}</div>
                           </section>;
@@ -2825,8 +2681,8 @@ export default function App() {
                     {calendarVisibleTasks.map((task) => (
                       <button key={task.id} type="button" onClick={() => setSelectedTaskId(task.id)} className={`block w-full min-w-0 rounded-xl border p-3 text-left ${calendarTaskTone(task)}`}>
                         <div className="flex flex-wrap items-start justify-between gap-2"><span className="min-w-0 break-words text-sm font-bold">{task.title}</span><span className="shrink-0 text-xs font-semibold">{task.dueDate}</span></div>
-                        <p className="mt-1 break-words text-xs">{task.projectName} Â· {task.assignedToName}</p>
-                        <p className="mt-1 text-xs">{task.status} Â· {task.priority}</p>
+                        <p className="mt-1 break-words text-xs">{task.projectName} · {task.assignedToName}</p>
+                        <p className="mt-1 text-xs">{task.status} · {task.priority}</p>
                       </button>
                     ))}
                   </div>
@@ -2911,7 +2767,7 @@ export default function App() {
                           <div key={project.id}>
                             <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
                               <span className="font-semibold text-slate-800 truncate">{project.name}</span>
-                              <span className="shrink-0 text-slate-500">{project.targetDate || "No deadline"} Â· {project.progressPercent || 0}%</span>
+                              <span className="shrink-0 text-slate-500">{project.targetDate || "No deadline"} · {project.progressPercent || 0}%</span>
                             </div>
                             <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
                               <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${Math.min(100, project.progressPercent || 0)}%` }} />
@@ -2928,8 +2784,8 @@ export default function App() {
                         {workloadData.map((member) => (
                           <div key={member.userId}>
                             <div className="flex items-center justify-between gap-3 text-xs mb-1.5">
-                              <span className="font-semibold text-slate-800 truncate">{member.name} Â· {member.teamName || "No team"}</span>
-                              <span className="shrink-0 text-slate-500">{member.totalTasks} tasks Â· {member.overdueTasks} overdue</span>
+                              <span className="font-semibold text-slate-800 truncate">{member.name} · {member.teamName || "No team"}</span>
+                              <span className="shrink-0 text-slate-500">{member.totalTasks} tasks · {member.overdueTasks} overdue</span>
                             </div>
                             <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
                               <div className={`h-full rounded-full ${member.overdueTasks > 0 ? "bg-rose-500" : "bg-teal-500"}`} style={{ width: `${Math.max(2, Math.round((member.totalTasks / maxTeamTasks) * 100))}%` }} />
@@ -3052,7 +2908,7 @@ export default function App() {
                                   <Link className="w-3 h-3" /> Repo Link
                                 </a>
                               ) : (
-                                <span className="text-slate-400">â€”</span>
+                                <span className="text-slate-600">—</span>
                               )}
                             </td>
                           </tr>
@@ -3083,15 +2939,15 @@ export default function App() {
                       </h3>
                       <div className="bg-slate-900 text-emerald-400 p-4 rounded-xl font-mono text-xs overflow-x-auto">
                         <pre>{`[Backlog / Unscheduled]
-         â†“
+         ↓
     [To Do (Ready)]
-         â†“
-  [In Progress (Working)] â†â”€â”€ Changes Requested
-         â†“                           â”‚
- [In Review (Submitted)]             â”‚
-         â†“                           â”‚
- [Reviewer Review] â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-         â†“ (Approved)
+         ↓
+  [In Progress (Working)] ←── Changes Requested
+         ↓                           │
+ [In Review (Submitted)]             │
+         ↓                           │
+ [Reviewer Review] ──────────────────┘
+         ↓ (Approved)
    [Completed]`}</pre>
                       </div>
                       <p className="text-xs text-slate-600">
@@ -3106,18 +2962,18 @@ export default function App() {
                       </h3>
                       <div className="bg-slate-900 text-emerald-300 p-4 rounded-xl font-mono text-xs overflow-x-auto">
                         <pre>{`Admin (Organization-Wide)
-  â”œâ”€â”€ Governance, Team Config & Permissions
-  â””â”€â”€ System-Level Oversight
+  ├── Governance, Team Config & Permissions
+  └── System-Level Oversight
 
 Team Leads / Managers (Shivam, Animesh)
-  â”œâ”€â”€ Defines Objectives, Creates & Assigns Tasks
-  â”œâ”€â”€ Monitors Deadlines, Capacity & Workload
-  â””â”€â”€ Reviews Deliverables & Reports Status
+  ├── Defines Objectives, Creates & Assigns Tasks
+  ├── Monitors Deadlines, Capacity & Workload
+  └── Reviews Deliverables & Reports Status
 
 Employees / Contributors (Sakshi, Vaibhav, Suraj)
-  â”œâ”€â”€ Acknowledges Tasks & Starts Work
-  â”œâ”€â”€ Updates Status, Records Blockers
-  â””â”€â”€ Submits Deliverables & Daily Reports`}</pre>
+  ├── Acknowledges Tasks & Starts Work
+  ├── Updates Status, Records Blockers
+  └── Submits Deliverables & Daily Reports`}</pre>
                       </div>
                       <p className="text-xs text-slate-600">
                         Server-side authorization enforces that only authorized personas can assign work, adjust ownership, or bypass review stages.
@@ -3151,9 +3007,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               </div>
               <div className="flex items-center gap-2">
                 {canEditTask(selectedTask) && (
-                  <button type="button" onClick={() => handleOpenEditTask(selectedTask)} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50">
-                    <Pencil className="h-4 w-4" /> Edit task
-                  </button>
+                  <button type="button" onClick={() => handleOpenEditTask(selectedTask)} className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-bold text-emerald-700 hover:bg-emerald-50"><Pencil className="h-4 w-4" /> Edit task</button>
                 )}
                 {canRemoveTask(selectedTask) && (
                   <button
@@ -3166,7 +3020,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 )}
                 <button
                   onClick={() => setSelectedTaskId(null)}
-                  className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition"
+                  className="p-1.5 text-slate-600 hover:text-slate-700 hover:bg-slate-200 rounded-lg transition"
                 >
                   <X className="w-5 h-5" />
                 </button>
@@ -3252,27 +3106,27 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               {/* Core Attributes Grid */}
               <div className="grid grid-cols-2 gap-4 bg-slate-50/50 p-4 rounded-xl border border-slate-100 text-xs">
                 <div>
-                  <p className="text-slate-400 font-semibold uppercase text-[10px]">Project</p>
+                  <p className="text-slate-600 font-semibold uppercase text-[10px]">Project</p>
                   <p className="font-bold text-slate-800 mt-0.5">{selectedTask.projectName}</p>
                 </div>
                 <div>
-                  <p className="text-slate-400 font-semibold uppercase text-[10px]">Assigned By</p>
+                  <p className="text-slate-600 font-semibold uppercase text-[10px]">Assigned By</p>
                   <p className="font-bold text-slate-800 mt-0.5">{selectedTask.assignedByName}</p>
                 </div>
                 <div>
-                  <p className="text-slate-400 font-semibold uppercase text-[10px]">Primary Assignee</p>
+                  <p className="text-slate-600 font-semibold uppercase text-[10px]">Primary Assignee</p>
                   <p className="font-bold text-emerald-800 mt-0.5">{selectedTask.assignedToName}</p>
                 </div>
                 <div>
-                  <p className="text-slate-400 font-semibold uppercase text-[10px]">Reviewer</p>
+                  <p className="text-slate-600 font-semibold uppercase text-[10px]">Reviewer</p>
                   <p className="font-bold text-slate-800 mt-0.5">{selectedTask.reviewerName || "Not assigned"}</p>
                 </div>
                 <div>
-                  <p className="text-slate-400 font-semibold uppercase text-[10px]">Due Date</p>
+                  <p className="text-slate-600 font-semibold uppercase text-[10px]">Due Date</p>
                   <p className="font-bold text-slate-800 mt-0.5">{selectedTask.dueDate || "N/A"}</p>
                 </div>
                 <div>
-                  <p className="text-slate-400 font-semibold uppercase text-[10px]">Estimated Effort</p>
+                  <p className="text-slate-600 font-semibold uppercase text-[10px]">Estimated Effort</p>
                   <p className="font-bold text-slate-800 mt-0.5">{selectedTask.estimatedHours} Hours</p>
                 </div>
               </div>
@@ -3303,7 +3157,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                         onChange={() => {}}
                         className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 w-4 h-4 cursor-pointer"
                       />
-                      <span className={`text-xs ${sub.isCompleted ? "line-through text-slate-400" : "text-slate-800 font-medium"}`}>
+                      <span className={`text-xs ${sub.isCompleted ? "line-through text-slate-600" : "text-slate-800 font-medium"}`}>
                         {sub.title}
                       </span>
                     </div>
@@ -3332,13 +3186,13 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
 
                 <div className="space-y-2.5 max-h-48 overflow-y-auto">
                   {taskComments.length === 0 ? (
-                    <p className="text-xs text-slate-400">No comments yet. Start the conversation below.</p>
+                    <p className="text-xs text-slate-600">No comments yet. Start the conversation below.</p>
                   ) : (
                     taskComments.map((c) => (
                       <div key={c.id} className="bg-slate-50 p-3 rounded-lg border border-slate-100 space-y-1">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-xs text-slate-900">{c.userName}</span>
-                          <span className="text-[10px] text-slate-400">
+                          <span className="text-[10px] text-slate-600">
                             {new Date(c.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                           </span>
                         </div>
@@ -3374,7 +3228,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                         <strong className="text-slate-800">{act.actorName}</strong>: {act.action}
                         {act.reason && <span className="text-slate-500"> ({act.reason})</span>}
                       </p>
-                      <span className="text-[10px] text-slate-400">{new Date(act.createdAt).toLocaleString()}</span>
+                      <span className="text-[10px] text-slate-600">{new Date(act.createdAt).toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
@@ -3392,7 +3246,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               <h2 className="text-lg font-black font-display text-slate-900">
                 {editingTaskId ? "Edit Task Assignment" : "Create & Assign Task"}
               </h2>
-              <button onClick={() => setIsTaskModalOpen(false)} className="p-1 text-slate-400 hover:text-slate-700">
+              <button onClick={() => setIsTaskModalOpen(false)} className="p-1 text-slate-600 hover:text-slate-700">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -3867,7 +3721,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                     minLength={7}
                     maxLength={8}
                     autoComplete="new-password"
-                    placeholder="7â€“8 characters"
+                    placeholder="7–8 characters"
                     value={userFormData.password}
                     onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
                     className="w-full px-3 py-2 pr-10 border border-slate-200 rounded-lg"
@@ -3876,12 +3730,12 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                     type="button"
                     aria-label={showUserPassword ? "Hide password" : "Show password"}
                     onClick={() => setShowUserPassword((v) => !v)}
-                    className="absolute inset-y-0 right-0 px-3 text-slate-400 hover:text-slate-700"
+                    className="absolute inset-y-0 right-0 px-3 text-slate-600 hover:text-slate-700"
                   >
                     <Eye className="h-4 w-4" />
                   </button>
                 </div>
-                <p className="mt-1 text-[11px] text-slate-500">7-8 characters with at least one letter and one number.</p>
+                <p className="mt-1 text-[11px] text-slate-500">7–8 characters with at least one letter and one number.</p>
               </div>
               <div className="flex items-center gap-2">
                 <input
@@ -4016,7 +3870,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 >
                   <option value="">Select an active teammate</option>
                   {deactivationReplacementUsers.map((user) => (
-                    <option key={user.id} value={user.id}>{user.name} Â· {user.role}</option>
+                    <option key={user.id} value={user.id}>{user.name} · {user.role}</option>
                   ))}
                 </select>
               </div>

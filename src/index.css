@@ -2,7 +2,7 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: "DM Sans", -apple-system, BlinkMacSystemFont,
+  --font-sans: "DM Sans Variable", -apple-system, BlinkMacSystemFont,
     "Segoe UI", Roboto, sans-serif;
   --font-display: var(--font-sans);
 
@@ -186,7 +186,7 @@ main pre {
 
 /* Cards */
 .card-hover {
-  transition: transform 180ms ease, box-shadow 180ms ease;
+  transition: transform 180ms ease;
 }
 
 .card-hover:hover {
@@ -215,8 +215,12 @@ textarea {
   transition:
     color 150ms ease,
     background-color 150ms ease,
-    border-color 150ms ease,
-    box-shadow 150ms ease;
+    border-color 150ms ease;
+}
+
+/* Keep card movement composited even when the card is a button. */
+button.card-hover {
+  transition: transform 180ms ease;
 }
 
 input,
