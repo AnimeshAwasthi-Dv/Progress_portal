@@ -7,9 +7,9 @@ async function runTests() {
   const users = await listUsers();
   console.log(`✓ Database initialized with ${users.length} users.`);
   const admin = users.find(u => u.role === "Admin")!;
-  const manager = users.find(u => u.role === "Manager")!;
-  const lead = users.find(u => u.role === "Team Lead")!;
-  const member = users.find(u => u.role === "Individual")!;
+  const manager = users.find(u => u.role === "Lead")!;
+  const lead = users.find(u => u.role === "Lead")!;
+  const member = users.find(u => u.role === "Employee")!;
 
   console.log(`✓ Roles verified: Admin (${admin.name}), Manager (${manager.name}), Lead (${lead.name}), Member (${member.name})`);
 

@@ -19,7 +19,7 @@ if (parsedDatabaseUrl.pathname.replace(/^\//, "") !== "task") {
 
 export const pool = new Pool({ connectionString: databaseUrl });
 
-export type UserRole = "Admin" | "Manager" | "Team Lead" | "Individual";
+export type UserRole = "Superadmin" | "Admin" | "Lead" | "Employee";
 export type TaskPriority = "Low" | "Medium" | "High" | "Urgent";
 export type TaskStatus = "Backlog" | "To Do" | "In Progress" | "In Review" | "Completed" | "Blocked";
 export type ReviewDecision = "Approved" | "Changes Requested";
@@ -49,8 +49,25 @@ export type Team = {
   managerId: number | null;
   managerName?: string | null;
   leadId: number | null;
+  departmentId: number | null;
+  departmentName?: string | null;
+  isActive: boolean;
   leadName?: string | null;
   memberCount?: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Department = {
+  id: number;
+  name: string;
+  description: string | null;
+  headUserId: number | null;
+  headName: string | null;
+  isActive: boolean;
+  activeMemberCount: number;
+  inactiveMemberCount: number;
+  teamCount: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -188,6 +205,7 @@ export type Notification = {
   type: string;
   taskId: number | null;
   projectId: number | null;
+  clientMeetingId?: number | null;
   isRead: boolean;
   createdAt: string;
 };
@@ -213,6 +231,18 @@ export type ProjectAllotment = {
   assistanceBy: string[];
   progress: TaskProgress;
   repositoryUrl: string | null;
+  taskId?: number;
+  assignedBy?: string;
+  projectName?: string;
+  projectLead?: string;
+  teamMembers?: string[];
+  assignmentDate?: string;
+  completionDate?: string | null;
+  dueDate?: string | null;
+  progressPercent?: number;
+  relatedLinks?: string[];
+  remarks?: string;
+  taskStatus?: TaskStatus;
 };
 
 export type DailyProgressReport = {
@@ -305,12 +335,25 @@ export async function initializeDatabase() {
 
     // 2. Comprehensive RBAC Schema
     await client.query(`
+      CREATE TABLE IF NOT EXISTS departments (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
+        description TEXT,
+        head_user_id INTEGER,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`
       CREATE TABLE IF NOT EXISTS teams (
         id SERIAL PRIMARY KEY,
         name TEXT NOT NULL UNIQUE CHECK (length(trim(name)) > 0),
         description TEXT,
         manager_id INTEGER,
         lead_id INTEGER,
+        department_id INTEGER REFERENCES departments(id) ON DELETE RESTRICT,
+        is_active BOOLEAN NOT NULL DEFAULT true,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
@@ -324,7 +367,7 @@ export async function initializeDatabase() {
         email TEXT NOT NULL UNIQUE CHECK (length(trim(email)) > 0),
         password_hash TEXT NOT NULL,
         password_reset_required BOOLEAN NOT NULL DEFAULT true,
-        role TEXT NOT NULL CHECK (role IN ('Admin', 'Manager', 'Team Lead', 'Individual')),
+        role TEXT NOT NULL CHECK (role IN ('Superadmin', 'Admin', 'Lead', 'Employee')),
         department TEXT NOT NULL DEFAULT 'Technical',
         designation TEXT NOT NULL DEFAULT 'Software Engineer',
         avatar_url TEXT,
@@ -347,7 +390,37 @@ export async function initializeDatabase() {
       WHERE username IS NULL OR trim(username) = ''
     `);
     await client.query("ALTER TABLE users ALTER COLUMN username SET NOT NULL");
+    await client.query(`
+      ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+      UPDATE users SET role = CASE
+        WHEN role IN ('Manager', 'Team Lead') THEN 'Lead'
+        WHEN role = 'Individual' THEN 'Employee'
+        ELSE role
+      END;
+      ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('Superadmin', 'Admin', 'Lead', 'Employee'));
+      UPDATE users SET role = 'Superadmin'
+      WHERE id = (SELECT id FROM users WHERE role = 'Admin' ORDER BY created_at, id LIMIT 1)
+        AND NOT EXISTS (SELECT 1 FROM users WHERE role = 'Superadmin');
+    `);
     await client.query("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (lower(username))");
+    await client.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name = 'departments_head_user_id_fkey') THEN
+          ALTER TABLE departments ADD CONSTRAINT departments_head_user_id_fkey FOREIGN KEY (head_user_id) REFERENCES users(id) ON DELETE SET NULL;
+        END IF;
+      END $$;
+    `);
+    await client.query(`
+      INSERT INTO departments (name)
+      SELECT DISTINCT trim(department) FROM users
+      WHERE department IS NOT NULL AND trim(department) <> ''
+      ON CONFLICT (name) DO NOTHING
+    `);
+    await client.query(`
+      ALTER TABLE teams ADD COLUMN IF NOT EXISTS department_id INTEGER REFERENCES departments(id) ON DELETE RESTRICT;
+      ALTER TABLE teams ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT true;
+    `);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -533,6 +606,73 @@ export async function initializeDatabase() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS task_deadline_reminder_events (
+        task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        stage TEXT NOT NULL,
+        due_date DATE NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (task_id, user_id, stage, due_date)
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS client_meetings (
+        id SERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        client_name TEXT NOT NULL,
+        client_contact TEXT,
+        starts_at TIMESTAMPTZ NOT NULL,
+        ends_at TIMESTAMPTZ NOT NULL,
+        time_zone TEXT NOT NULL,
+        meeting_type TEXT NOT NULL CHECK (meeting_type IN ('Online', 'In-person')),
+        meeting_link TEXT,
+        location TEXT,
+        agenda TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        organizer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+        department_id INTEGER REFERENCES departments(id) ON DELETE SET NULL,
+        project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+        task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'Scheduled' CHECK (status IN ('Scheduled', 'Completed', 'Cancelled', 'Rescheduled')),
+        minutes TEXT NOT NULL DEFAULT '',
+        decisions TEXT NOT NULL DEFAULT '',
+        client_feedback TEXT NOT NULL DEFAULT '',
+        action_items TEXT NOT NULL DEFAULT '',
+        follow_up_assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        follow_up_deadline DATE,
+        resulting_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (ends_at > starts_at),
+        CHECK ((meeting_type = 'Online' AND meeting_link IS NOT NULL) OR (meeting_type = 'In-person' AND location IS NOT NULL))
+      );
+      CREATE TABLE IF NOT EXISTS client_meeting_participants (
+        meeting_id INTEGER NOT NULL REFERENCES client_meetings(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        PRIMARY KEY (meeting_id, user_id)
+      );
+      ALTER TABLE client_meetings ADD COLUMN IF NOT EXISTS follow_up_assignee_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+      ALTER TABLE client_meetings ADD COLUMN IF NOT EXISTS follow_up_deadline DATE;
+      CREATE INDEX IF NOT EXISTS idx_client_meetings_starts_at ON client_meetings(starts_at);
+      CREATE INDEX IF NOT EXISTS idx_client_meeting_participants_user ON client_meeting_participants(user_id, meeting_id);
+      CREATE TABLE IF NOT EXISTS client_meeting_reminder_events (
+        meeting_id INTEGER NOT NULL REFERENCES client_meetings(id) ON DELETE CASCADE,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        reminder_at TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (meeting_id, user_id, reminder_at)
+      );
+      CREATE TABLE IF NOT EXISTS user_notification_preferences (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        client_meetings BOOLEAN NOT NULL DEFAULT true,
+        meeting_reminders BOOLEAN NOT NULL DEFAULT true,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS client_meeting_id INTEGER REFERENCES client_meetings(id) ON DELETE SET NULL;
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS user_audit_history (
         id SERIAL PRIMARY KEY,
         actor_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
@@ -617,13 +757,43 @@ export async function initializeDatabase() {
       const technicalTeam = teamRes.rows.find((team) => team.name === "Technical");
       const admin = await client.query<{ id: number }>(
         `INSERT INTO users (name, username, email, password_hash, password_reset_required, role, department, designation, team_id)
-         VALUES ('Admin', 'admin', 'admin@taskmanager.internal', $1, true, 'Admin', 'Executive', 'System Administrator', $2)
+         VALUES ('Admin', 'admin', 'admin@taskmanager.internal', $1, true, 'Superadmin', 'Executive', 'System Administrator', $2)
          RETURNING id`,
         [await hashPassword(initialAdminPassword), technicalTeam!.id],
       );
       await client.query("UPDATE teams SET manager_id = $1 WHERE id = $2", [admin.rows[0].id, technicalTeam!.id]);
       await client.query("INSERT INTO team_members (team_id, user_id) VALUES ($1, $2)", [technicalTeam!.id, admin.rows[0].id]);
     }
+
+    await client.query(`
+      INSERT INTO departments (name)
+      SELECT DISTINCT trim(department) FROM users
+      WHERE department IS NOT NULL AND trim(department) <> ''
+      ON CONFLICT (name) DO NOTHING
+    `);
+    await client.query(`
+      INSERT INTO departments (name)
+      SELECT DISTINCT trim(name) FROM teams WHERE trim(name) <> ''
+      ON CONFLICT (name) DO NOTHING
+    `);
+    await client.query(`
+      UPDATE teams t SET department_id = d.id
+      FROM departments d
+      WHERE t.department_id IS NULL AND lower(trim(t.name)) = lower(trim(d.name))
+    `);
+    await client.query(`
+      WITH team_departments AS (
+        SELECT tm.team_id, d.id AS department_id,
+          row_number() OVER (PARTITION BY tm.team_id ORDER BY COUNT(*) DESC, d.id) AS preference
+        FROM team_members tm
+        JOIN users u ON u.id = tm.user_id
+        JOIN departments d ON lower(trim(d.name)) = lower(trim(u.department))
+        GROUP BY tm.team_id, d.id
+      )
+      UPDATE teams t SET department_id = td.department_id
+      FROM team_departments td
+      WHERE t.id = td.team_id AND t.department_id IS NULL AND td.preference = 1
+    `);
 
     await client.query("COMMIT");
   } catch (error) {
@@ -636,11 +806,73 @@ export async function initializeDatabase() {
 
 // ----------------- Data Access Functions ----------------- //
 
+export async function listDepartments() {
+  const { rows } = await pool.query<Department>(`
+    SELECT d.id, d.name, d.description, d.head_user_id AS "headUserId",
+      head.name AS "headName", d.is_active AS "isActive",
+      COUNT(DISTINCT u.id) FILTER (WHERE u.is_active) AS "activeMemberCount",
+      COUNT(DISTINCT u.id) FILTER (WHERE NOT u.is_active) AS "inactiveMemberCount",
+      COUNT(DISTINCT t.id) FILTER (WHERE t.is_active) AS "teamCount",
+      d.created_at AS "createdAt", d.updated_at AS "updatedAt"
+    FROM departments d
+    LEFT JOIN users head ON head.id = d.head_user_id
+    LEFT JOIN users u ON lower(trim(u.department)) = lower(trim(d.name))
+    LEFT JOIN teams t ON t.department_id = d.id
+    GROUP BY d.id, head.name
+    ORDER BY lower(d.name)
+  `);
+  return rows;
+}
+
+export async function createDepartment(input: { name: string; description?: string; headUserId?: number | null }) {
+  const { rows } = await pool.query<Department>(`
+    INSERT INTO departments (name, description, head_user_id)
+    VALUES ($1, $2, $3)
+    RETURNING id, name, description, head_user_id AS "headUserId", NULL::text AS "headName",
+      is_active AS "isActive", 0::int AS "activeMemberCount", 0::int AS "inactiveMemberCount",
+      0::int AS "teamCount", created_at AS "createdAt", updated_at AS "updatedAt"
+  `, [input.name, input.description || null, input.headUserId || null]);
+  return rows[0];
+}
+
+export async function updateDepartment(id: number, input: { name: string; description?: string; headUserId?: number | null }) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const current = await client.query<{ name: string }>("SELECT name FROM departments WHERE id = $1 FOR UPDATE", [id]);
+    if (!current.rowCount) { await client.query("ROLLBACK"); return null; }
+    await client.query("UPDATE users SET department = $2, updated_at = NOW() WHERE lower(trim(department)) = lower(trim($1))", [current.rows[0].name, input.name]);
+    const { rows } = await client.query<Department>(`
+      UPDATE departments SET name = $2, description = $3, head_user_id = $4, updated_at = NOW()
+      WHERE id = $1
+      RETURNING id, name, description, head_user_id AS "headUserId", NULL::text AS "headName",
+        is_active AS "isActive", 0::int AS "activeMemberCount", 0::int AS "inactiveMemberCount",
+        0::int AS "teamCount", created_at AS "createdAt", updated_at AS "updatedAt"
+    `, [id, input.name, input.description || null, input.headUserId || null]);
+    await client.query("COMMIT");
+    return rows[0];
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+}
+
+export async function setDepartmentActive(id: number, isActive: boolean) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await client.query("UPDATE departments SET is_active = $2, updated_at = NOW() WHERE id = $1", [id, isActive]);
+    if (!result.rowCount) { await client.query("ROLLBACK"); return { ok: false as const }; }
+    if (!isActive) await client.query("UPDATE teams SET is_active = false, updated_at = NOW() WHERE department_id = $1", [id]);
+    await client.query("COMMIT");
+    return { ok: true as const };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+}
+
 export async function listUsers(viewer?: AccessUser) {
   const values: unknown[] = [];
   let whereClause = "";
-  if (viewer && viewer.role !== "Admin") {
-    if (viewer.role === "Individual") {
+  if (viewer && (viewer.role !== "Admin" && viewer.role !== "Superadmin")) {
+    if (viewer.role === "Employee") {
       whereClause = "WHERE u.id = $1";
       values.push(viewer.id);
     } else {
@@ -710,7 +942,7 @@ export async function getUserById(id: number) {
 
 export async function hideInactiveUserProfile(id: number) {
   const result = await pool.query(
-    "UPDATE users SET hidden_from_admin = true, updated_at = NOW() WHERE id = $1 AND role = 'Individual' AND is_active = false",
+    "UPDATE users SET hidden_from_admin = true, updated_at = NOW() WHERE id = $1 AND role = 'Employee' AND is_active = false",
     [id],
   );
   return (result.rowCount ?? 0) > 0;
@@ -810,9 +1042,10 @@ export async function updateUserRoleAndStatus(
       await client.query("ROLLBACK");
       return null;
     }
-    if (current.role === "Admin" && current.isActive && input.role !== undefined && input.role !== "Admin") {
+    if ((current.role === "Admin" || current.role === "Superadmin") && current.isActive && input.role !== undefined && input.role !== current.role) {
       const adminCount = await client.query<{ count: string }>(
-        "SELECT COUNT(*) FROM users WHERE role = 'Admin' AND is_active = true",
+        "SELECT COUNT(*) FROM users WHERE role = $1 AND is_active = true",
+        [current.role],
       );
       if (Number(adminCount.rows[0].count) <= 1) {
         await client.query("ROLLBACK");
@@ -848,10 +1081,10 @@ export async function updateUserRoleAndStatus(
       }
     }
     if (input.role !== undefined) {
-      if (!["Admin", "Manager"].includes(input.role)) {
+      if (!["Admin", "Lead"].includes(input.role)) {
         await client.query("UPDATE teams SET manager_id = NULL WHERE manager_id = $1", [id]);
       }
-      if (input.role !== "Team Lead") {
+      if (input.role !== "Lead") {
         await client.query("UPDATE teams SET lead_id = NULL WHERE lead_id = $1", [id]);
       }
     }
@@ -895,7 +1128,7 @@ export async function deactivateUser(
       return { ok: false, code: "not_found" };
     }
 
-    if (actor.role !== "Admin") {
+    if ((actor.role !== "Admin" && actor.role !== "Superadmin")) {
       const managedTeam = await client.query<{ allowed: boolean }>(`
         SELECT EXISTS (
           SELECT 1 FROM teams managed_team
@@ -907,8 +1140,8 @@ export async function deactivateUser(
         ) AS allowed
       `, [actor.id, targetUserId]);
       if (
-        !["Manager", "Team Lead"].includes(actor.role) ||
-        target.role !== "Individual" ||
+        actor.role !== "Lead" ||
+        target.role !== "Employee" ||
         actor.id === targetUserId ||
         !managedTeam.rows[0]?.allowed
       ) {
@@ -917,9 +1150,10 @@ export async function deactivateUser(
       }
     }
 
-    if (target.role === "Admin") {
+    if ((target.role === "Admin" || target.role === "Superadmin")) {
       const adminCount = await client.query<{ count: string }>(
-        "SELECT COUNT(*) FROM users WHERE role = 'Admin' AND is_active = true",
+        "SELECT COUNT(*) FROM users WHERE role = $1 AND is_active = true",
+        [target.role],
       );
       if (Number(adminCount.rows[0].count) <= 1) {
         await client.query("ROLLBACK");
@@ -946,7 +1180,7 @@ export async function deactivateUser(
         await client.query("ROLLBACK");
         return { ok: false, code: "invalid_replacement" };
       }
-      if (actor.role !== "Admin") {
+      if ((actor.role !== "Admin" && actor.role !== "Superadmin")) {
         const replacementInTeam = await client.query<{ allowed: boolean }>(`
           SELECT EXISTS (
             SELECT 1 FROM team_members actor_membership
@@ -1064,7 +1298,7 @@ export async function createUser(input: {
 export async function listTeams(viewer?: AccessUser) {
   const values: unknown[] = [];
   let whereClause = "";
-  if (viewer && viewer.role !== "Admin") {
+  if (viewer && (viewer.role !== "Admin" && viewer.role !== "Superadmin")) {
     // Team Leads / Managers see teams they lead, manage, or are a member of
     whereClause = `WHERE t.manager_id = $1 OR t.lead_id = $1 OR EXISTS (
       SELECT 1 FROM team_members tm WHERE tm.team_id = t.id AND tm.user_id = $1
@@ -1080,36 +1314,64 @@ export async function listTeams(viewer?: AccessUser) {
       um.name AS "managerName",
       t.lead_id AS "leadId",
       ul.name AS "leadName",
+      t.department_id AS "departmentId",
+      d.name AS "departmentName",
+      t.is_active AS "isActive",
       COUNT(DISTINCT tm.user_id) FILTER (WHERE member_user.is_active = true)::integer AS "memberCount",
       t.created_at AS "createdAt",
       t.updated_at AS "updatedAt"
     FROM teams t
     LEFT JOIN users um ON t.manager_id = um.id
     LEFT JOIN users ul ON t.lead_id = ul.id
+    LEFT JOIN departments d ON d.id = t.department_id
     LEFT JOIN team_members tm ON t.id = tm.team_id
     LEFT JOIN users member_user ON member_user.id = tm.user_id
     ${whereClause}
-    GROUP BY t.id, um.name, ul.name
+    GROUP BY t.id, um.name, ul.name, d.name
     ORDER BY t.id
   `, values);
   return rows;
 }
 
-export async function createTeam(input: { name: string; description?: string; managerId?: number | null; leadId?: number | null }) {
+export async function createTeam(input: { name: string; description?: string; managerId?: number | null; leadId?: number | null; departmentId?: number | null }) {
   const { rows } = await pool.query<Team>(`
-    INSERT INTO teams (name, description, manager_id, lead_id)
-    VALUES ($1, $2, $3, $4)
-    RETURNING id, name, description, manager_id AS "managerId", lead_id AS "leadId", created_at AS "createdAt", updated_at AS "updatedAt"
-  `, [input.name, input.description || null, input.managerId || null, input.leadId || null]);
+    INSERT INTO teams (name, description, manager_id, lead_id, department_id)
+    VALUES ($1, $2, $3, $4, $5)
+    RETURNING id, name, description, manager_id AS "managerId", lead_id AS "leadId", department_id AS "departmentId", is_active AS "isActive", created_at AS "createdAt", updated_at AS "updatedAt"
+  `, [input.name, input.description || null, input.managerId || null, input.leadId || null, input.departmentId || null]);
   return rows[0];
+}
+
+export async function setTeamActive(id: number, isActive: boolean) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const team = await client.query<{ id: number }>("SELECT id FROM teams WHERE id = $1 FOR UPDATE", [id]);
+    if (!team.rowCount) { await client.query("ROLLBACK"); return { ok: false as const }; }
+    if (!isActive) {
+      const openTasks = await client.query<{ count: number }>(`
+        SELECT COUNT(DISTINCT task.id)::int AS count FROM tasks task
+        JOIN team_members tm ON tm.user_id = task.assigned_to_user_id
+        WHERE tm.team_id = $1 AND task.status <> 'Completed'
+      `, [id]);
+      if (openTasks.rows[0].count > 0) { await client.query("ROLLBACK"); return { ok: false as const, openTaskCount: openTasks.rows[0].count }; }
+      await client.query("DELETE FROM team_members WHERE team_id = $1", [id]);
+      await client.query("UPDATE users SET team_id = NULL, updated_at = NOW() WHERE team_id = $1", [id]);
+      await client.query("UPDATE teams SET manager_id = NULL, lead_id = NULL WHERE id = $1", [id]);
+    }
+    await client.query("UPDATE teams SET is_active = $2, updated_at = NOW() WHERE id = $1", [id, isActive]);
+    await client.query("COMMIT");
+    return { ok: true as const };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 }
 
 type AccessUser = Pick<User, "id" | "role" | "teamId">;
 
 function projectVisibilityClause(user: AccessUser, projectAlias: string, firstParameter: number) {
   const userParameter = `$${firstParameter}`;
-  if (user.role === "Admin") return { sql: "TRUE", values: [] as unknown[] };
-  if (user.role === "Individual") {
+  if ((user.role === "Admin" || user.role === "Superadmin")) return { sql: "TRUE", values: [] as unknown[] };
+  if (user.role === "Employee") {
     return {
       sql: `(
         EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = ${projectAlias}.id AND pm.user_id = ${userParameter})
@@ -1135,8 +1397,8 @@ function projectVisibilityClause(user: AccessUser, projectAlias: string, firstPa
 }
 
 function taskVisibilityClause(user: AccessUser, taskAlias: string, projectAlias: string, firstParameter: number) {
-  if (user.role === "Admin") return { sql: "TRUE", values: [] as unknown[] };
-  if (user.role === "Individual") {
+  if ((user.role === "Admin" || user.role === "Superadmin")) return { sql: "TRUE", values: [] as unknown[] };
+  if (user.role === "Employee") {
     const userParameter = `$${firstParameter}`;
     return {
       sql: `(${taskAlias}.assigned_to_user_id = ${userParameter} OR EXISTS (
@@ -1151,7 +1413,7 @@ function taskVisibilityClause(user: AccessUser, taskAlias: string, projectAlias:
 export async function listProjects(viewer?: AccessUser) {
   const values: unknown[] = [];
   let whereClause = "";
-  if (viewer && viewer.role !== "Admin") {
+  if (viewer && (viewer.role !== "Admin" && viewer.role !== "Superadmin")) {
     const visibility = projectVisibilityClause(viewer, "p", 1);
     whereClause = `WHERE ${visibility.sql}`;
     values.push(...visibility.values);
@@ -1194,7 +1456,7 @@ export async function canAccessProject(viewer: AccessUser, projectId: number) {
 }
 
 export async function canAssignUserToProject(viewer: AccessUser, targetUserId: number, projectId: number) {
-  if (viewer.role === "Admin") {
+  if ((viewer.role === "Admin" || viewer.role === "Superadmin")) {
     const { rows } = await pool.query<{ allowed: boolean }>(
       "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active = true) AS allowed",
       [targetUserId],
@@ -1241,6 +1503,14 @@ export async function createProject(input: {
     `, [input.name, input.code.toUpperCase(), input.description || null, input.managerId || null, input.leadId || null, input.startDate || null, input.targetDate || null]);
     for (const userId of new Set([input.managerId, input.leadId].filter((id): id is number => Boolean(id)))) {
       await client.query("INSERT INTO project_members (project_id, user_id, role_in_project) VALUES ($1, $2, 'Manager') ON CONFLICT DO NOTHING", [rows[0].id, userId]);
+    }
+    if (input.createdByUserId !== undefined) {
+      await client.query(`
+        INSERT INTO notifications (user_id, title, message, type, project_id)
+        SELECT DISTINCT recipient.id, 'Project assigned', $2, 'project_assignment', $3
+        FROM users recipient
+        WHERE recipient.id = ANY($1::int[]) AND recipient.id <> $4 AND recipient.is_active
+      `, [[input.managerId, input.leadId].filter((userId): userId is number => Boolean(userId)), `You have been assigned to project ${input.name}.`, rows[0].id, input.createdByUserId]);
     }
     if (input.createdByUserId !== undefined) {
       await client.query(`
@@ -1302,8 +1572,8 @@ export async function listTasks(filters?: {
     values.push(`%${filters.search}%`);
     idx++;
   }
-  if (filters?.viewer && filters.viewer.role !== "Admin") {
-    if (filters.viewer.role === "Individual") {
+  if (filters?.viewer && (filters.viewer.role !== "Admin" && filters.viewer.role !== "Superadmin")) {
+    if (filters.viewer.role === "Employee") {
       conditions.push(`(t.assigned_to_user_id = $${idx} OR EXISTS (SELECT 1 FROM task_collaborators tc WHERE tc.task_id = t.id AND tc.user_id = $${idx}))`);
       values.push(filters.viewer.id);
       idx++;
@@ -1375,8 +1645,8 @@ export async function listTasks(filters?: {
 export async function getTaskById(id: number, viewer?: AccessUser) {
   const conditions = ["t.id = $1"];
   const values: unknown[] = [id];
-  if (viewer && viewer.role !== "Admin") {
-    if (viewer.role === "Individual") {
+  if (viewer && (viewer.role !== "Admin" && viewer.role !== "Superadmin")) {
+    if (viewer.role === "Employee") {
       conditions.push(`(t.assigned_to_user_id = $2 OR EXISTS (SELECT 1 FROM task_collaborators tc WHERE tc.task_id = t.id AND tc.user_id = $2))`);
       values.push(viewer.id);
     } else {
@@ -1461,7 +1731,7 @@ export async function getTaskById(id: number, viewer?: AccessUser) {
 export async function deleteTaskForUser(id: number, viewer: AccessUser) {
   if (!Number.isSafeInteger(id) || id < 1) return false;
 
-  if (viewer.role === "Admin") {
+  if ((viewer.role === "Admin" || viewer.role === "Superadmin")) {
     const result = await pool.query("DELETE FROM tasks WHERE id = $1", [id]);
     return (result.rowCount ?? 0) > 0;
   }
@@ -1631,6 +1901,9 @@ export async function updateTaskDetails(id: number, actorUserId: number, input: 
         fields.push(`progress_percent = 100`);
       } else if (input.status === 'In Review') {
         fields.push(`submitted_for_review_at = NOW()`);
+        fields.push(`completed_at = NULL`);
+      } else {
+        fields.push(`completed_at = NULL`);
       }
       await client.query(`INSERT INTO task_activity_history (task_id, actor_user_id, action, field_changed, old_value, new_value) VALUES ($1, $2, 'STATUS_CHANGED', 'status', $3, $4)`, [id, actorUserId, current.status, input.status]);
       
@@ -1643,13 +1916,16 @@ export async function updateTaskDetails(id: number, actorUserId: number, input: 
         await client.query(`INSERT INTO notifications (user_id, title, message, type, task_id) VALUES ($1, 'Task Blocked Alert', $2, 'blocker', $3)`, [current.assignedByUserId, `Task ${current.taskCode} has been marked as Blocked: ${input.blockerReason || 'Technical blocker reported.'}`, id]);
       }
     }
-    if (input.startDate !== undefined) {
+    if (input.startDate !== undefined && input.startDate !== current.startDate) {
       fields.push(`start_date = $${idx++}::date`);
       values.push(input.startDate || null);
+      await client.query(`INSERT INTO task_activity_history (task_id, actor_user_id, action, field_changed, old_value, new_value) VALUES ($1, $2, 'DEADLINE_CHANGED', 'start_date', $3, $4)`, [id, actorUserId, current.startDate || null, input.startDate || null]);
     }
-    if (input.dueDate !== undefined) {
+    if (input.dueDate !== undefined && input.dueDate !== current.dueDate) {
       fields.push(`due_date = $${idx++}::date`);
       values.push(input.dueDate || null);
+      await client.query(`INSERT INTO task_activity_history (task_id, actor_user_id, action, field_changed, old_value, new_value) VALUES ($1, $2, 'DEADLINE_CHANGED', 'due_date', $3, $4)`, [id, actorUserId, current.dueDate || null, input.dueDate || null]);
+      await client.query(`INSERT INTO notifications (user_id, title, message, type, task_id, project_id) VALUES ($1, 'Task deadline changed', $2, 'deadline_change', $3, $4)`, [current.assignedToUserId, `The due date for ${current.taskCode} (${current.title}) changed to ${input.dueDate || 'no due date'}.`, id, current.projectId]);
     }
     if (input.estimatedHours !== undefined) {
       fields.push(`estimated_hours = $${idx++}`);
@@ -1878,13 +2154,188 @@ export async function toggleSubtask(id: number, isCompleted: boolean) {
 
 export async function listNotifications(userId: number) {
   const { rows } = await pool.query<Notification>(`
-    SELECT id, user_id AS "userId", title, message, type, task_id AS "taskId", project_id AS "projectId", is_read AS "isRead", created_at AS "createdAt"
+    SELECT id, user_id AS "userId", title, message, type, task_id AS "taskId", project_id AS "projectId", client_meeting_id AS "clientMeetingId", is_read AS "isRead", created_at AS "createdAt"
     FROM notifications
     WHERE user_id = $1
     ORDER BY id DESC
     LIMIT 50
   `, [userId]);
   return rows;
+}
+
+export type ClientMeeting = {
+  id: number; title: string; clientName: string; clientContact: string | null;
+  startsAt: string; endsAt: string; timeZone: string; meetingType: "Online" | "In-person";
+  meetingLink: string | null; location: string | null; agenda: string; description: string;
+  organizerId: number; organizerName: string; departmentId: number | null; departmentName: string | null;
+  projectId: number | null; projectName: string | null; taskId: number | null; taskTitle: string | null;
+  status: "Scheduled" | "Completed" | "Cancelled" | "Rescheduled"; minutes: string; decisions: string;
+  clientFeedback: string; actionItems: string; resultingTaskId: number | null; participants: { id: number; name: string; email: string }[];
+  followUpAssigneeId: number | null; followUpDeadline: string | null;
+};
+
+const clientMeetingSelect = `
+  SELECT m.id, m.title, m.client_name AS "clientName", m.client_contact AS "clientContact",
+    m.starts_at AS "startsAt", m.ends_at AS "endsAt", m.time_zone AS "timeZone",
+    m.meeting_type AS "meetingType", m.meeting_link AS "meetingLink", m.location,
+    m.agenda, m.description, m.organizer_id AS "organizerId", organizer.name AS "organizerName",
+    m.department_id AS "departmentId", d.name AS "departmentName", m.project_id AS "projectId",
+    p.name AS "projectName", m.task_id AS "taskId", task.title AS "taskTitle", m.status,
+    m.minutes, m.decisions, m.client_feedback AS "clientFeedback", m.action_items AS "actionItems",
+    m.resulting_task_id AS "resultingTaskId", m.follow_up_assignee_id AS "followUpAssigneeId", m.follow_up_deadline AS "followUpDeadline",
+    COALESCE((SELECT json_agg(json_build_object('id', u.id, 'name', u.name, 'email', u.email) ORDER BY u.name)
+      FROM client_meeting_participants mp JOIN users u ON u.id = mp.user_id WHERE mp.meeting_id = m.id), '[]'::json) AS participants
+  FROM client_meetings m JOIN users organizer ON organizer.id = m.organizer_id
+  LEFT JOIN departments d ON d.id = m.department_id LEFT JOIN projects p ON p.id = m.project_id
+  LEFT JOIN tasks task ON task.id = m.task_id
+`;
+
+export async function listClientMeetings(viewer: AccessUser) {
+  const params: unknown[] = [viewer.id];
+  let visibility = `m.organizer_id = $1 OR EXISTS (SELECT 1 FROM client_meeting_participants mp WHERE mp.meeting_id = m.id AND mp.user_id = $1)`;
+  if (viewer.role === "Admin" || viewer.role === "Superadmin") { visibility = "TRUE"; params.length = 0; }
+  else if (viewer.role === "Lead") {
+    params.push(viewer.id);
+    visibility += ` OR EXISTS (SELECT 1 FROM client_meeting_participants mp JOIN team_members tm ON tm.user_id = mp.user_id JOIN teams t ON t.id = tm.team_id WHERE mp.meeting_id = m.id AND (t.lead_id = $2 OR t.manager_id = $2))
+      OR EXISTS (SELECT 1 FROM tasks linked_task JOIN team_members tm ON tm.user_id=linked_task.assigned_to_user_id JOIN teams t ON t.id=tm.team_id WHERE linked_task.id=m.task_id AND (t.lead_id=$2 OR t.manager_id=$2))`;
+  }
+  const { rows } = await pool.query<ClientMeeting>(`${clientMeetingSelect} WHERE (${visibility}) ORDER BY m.starts_at`, params);
+  return rows;
+}
+
+export async function listClientMeetingParticipants(viewer: AccessUser) {
+  if (viewer.role !== "Employee") return listUsers(viewer);
+  const { rows } = await pool.query<User>(`
+    SELECT u.id, u.name, u.username, u.email, u.role, u.department, u.designation, u.avatar_url AS "avatarUrl",
+      u.is_active AS "isActive", u.hidden_from_admin AS "isHiddenFromAdmin", u.password_reset_required AS "mustChangePassword",
+      u.team_id AS "teamId", t.name AS "teamName", u.created_at AS "createdAt", u.updated_at AS "updatedAt"
+    FROM users u LEFT JOIN teams t ON t.id=u.team_id
+    WHERE u.is_active AND (u.id=$1 OR (u.team_id IS NOT NULL AND u.team_id=$2)) ORDER BY u.name
+  `, [viewer.id, viewer.teamId || null]);
+  return rows;
+}
+
+export async function listClientMeetingOrganizers() {
+  const { rows } = await pool.query<{ id: number; name: string; role: UserRole; isActive: boolean }>(`
+    SELECT id, name, role, is_active AS "isActive"
+    FROM users WHERE is_active = true ORDER BY lower(name)
+  `);
+  return rows;
+}
+
+export async function listClientMeetingDepartments() {
+  const { rows } = await pool.query<{ id: number; name: string }>("SELECT id,name FROM departments WHERE is_active ORDER BY lower(name)");
+  return rows;
+}
+
+export async function getClientMeeting(id: number) {
+  const { rows } = await pool.query<ClientMeeting>(`${clientMeetingSelect} WHERE m.id = $1`, [id]);
+  return rows[0] || null;
+}
+
+export async function createClientMeeting(input: {
+  title: string; clientName: string; clientContact?: string; startsAt: string; endsAt: string; timeZone: string;
+  meetingType: "Online" | "In-person"; meetingLink?: string; location?: string; agenda?: string; description?: string;
+  organizerId: number; departmentId?: number | null; projectId?: number | null; taskId?: number | null; participantIds: number[];
+}) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const { rows } = await client.query<{ id: number }>(`
+      INSERT INTO client_meetings (title, client_name, client_contact, starts_at, ends_at, time_zone, meeting_type, meeting_link, location, agenda, description, organizer_id, department_id, project_id, task_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING id
+    `, [input.title, input.clientName, input.clientContact || null, input.startsAt, input.endsAt, input.timeZone, input.meetingType, input.meetingLink || null, input.location || null, input.agenda || "", input.description || "", input.organizerId, input.departmentId || null, input.projectId || null, input.taskId || null]);
+    const meetingId = rows[0].id;
+    for (const participantId of new Set(input.participantIds.filter((userId) => userId !== input.organizerId))) {
+      await client.query("INSERT INTO client_meeting_participants (meeting_id, user_id) VALUES ($1,$2)", [meetingId, participantId]);
+      await client.query(`INSERT INTO notifications (user_id,title,message,type,project_id,client_meeting_id)
+        SELECT $1,'Client meeting scheduled',$2,'client_meeting',$3,$4
+        WHERE COALESCE((SELECT client_meetings FROM user_notification_preferences WHERE user_id=$1),true)`, [participantId, `${input.title} with ${input.clientName} has been scheduled.`, input.projectId || null, meetingId]);
+    }
+    await client.query(`INSERT INTO notifications (user_id,title,message,type,project_id,client_meeting_id)
+      SELECT $1,'Client meeting assigned',$2,'client_meeting',$3,$4
+      WHERE COALESCE((SELECT client_meetings FROM user_notification_preferences WHERE user_id=$1),true)`, [input.organizerId, `${input.title} with ${input.clientName} has been assigned to you as organizer.`, input.projectId || null, meetingId]);
+    await client.query("COMMIT");
+    return getClientMeeting(meetingId);
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+}
+
+export async function updateClientMeeting(id: number, input: {
+  title?: string; clientName?: string; clientContact?: string | null; startsAt?: string; endsAt?: string; timeZone?: string;
+  meetingType?: "Online" | "In-person"; meetingLink?: string | null; location?: string | null; agenda?: string; description?: string;
+  organizerId?: number; departmentId?: number | null; projectId?: number | null; taskId?: number | null; participantIds?: number[]; status?: ClientMeeting["status"];
+  minutes?: string; decisions?: string; clientFeedback?: string; actionItems?: string; resultingTaskId?: number | null;
+  followUpAssigneeId?: number | null; followUpDeadline?: string | null;
+}) {
+  const fields: Record<string, unknown> = {
+    title: input.title, client_name: input.clientName, client_contact: input.clientContact, starts_at: input.startsAt,
+    ends_at: input.endsAt, time_zone: input.timeZone, meeting_type: input.meetingType, meeting_link: input.meetingLink,
+    location: input.location, agenda: input.agenda, description: input.description, organizer_id: input.organizerId, department_id: input.departmentId,
+    project_id: input.projectId, task_id: input.taskId, status: input.status, minutes: input.minutes,
+    decisions: input.decisions, client_feedback: input.clientFeedback, action_items: input.actionItems,
+    resulting_task_id: input.resultingTaskId,
+    follow_up_assignee_id: input.followUpAssigneeId, follow_up_deadline: input.followUpDeadline,
+  };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const oldResult = await client.query<{ starts_at: Date; ends_at: Date; status: string; title: string; client_name: string; project_id: number | null; organizer_id: number }>("SELECT starts_at, ends_at, status, title, client_name, project_id, organizer_id FROM client_meetings WHERE id=$1 FOR UPDATE", [id]);
+    const old = oldResult.rows[0]; if (!old) { await client.query("ROLLBACK"); return null; }
+    const keys = Object.keys(fields).filter((key) => fields[key] !== undefined);
+    if (keys.length) {
+      const assignments = keys.map((key, index) => `${key}=$${index + 2}`);
+      assignments.push("updated_at=NOW()");
+      await client.query(`UPDATE client_meetings SET ${assignments.join(",")} WHERE id=$1`, [id, ...keys.map((key) => fields[key])]);
+    }
+    if (input.participantIds) {
+      const existing = await client.query<{ user_id: number }>("SELECT user_id FROM client_meeting_participants WHERE meeting_id=$1", [id]);
+      const previous = new Set(existing.rows.map((row) => row.user_id));
+      await client.query("DELETE FROM client_meeting_participants WHERE meeting_id=$1", [id]);
+      for (const participantId of new Set(input.participantIds.filter((userId) => userId !== (input.organizerId ?? old.organizer_id)))) {
+        await client.query("INSERT INTO client_meeting_participants (meeting_id,user_id) VALUES ($1,$2)", [id, participantId]);
+        if (!previous.has(participantId)) await client.query(`INSERT INTO notifications (user_id,title,message,type,project_id,client_meeting_id)
+          SELECT $1,'Client meeting scheduled',$2,'client_meeting',$3,$4 WHERE COALESCE((SELECT client_meetings FROM user_notification_preferences WHERE user_id=$1),true)`, [participantId, `${old.title} with ${old.client_name} has been scheduled.`, input.projectId ?? old.project_id, id]);
+      }
+    }
+    const moved = input.startsAt !== undefined && new Date(input.startsAt).getTime() !== new Date(old.starts_at).getTime();
+    const nowCancelled = input.status === "Cancelled" && old.status !== "Cancelled";
+    if (moved || nowCancelled) {
+      const participants = await client.query<{ user_id: number }>("SELECT user_id FROM client_meeting_participants WHERE meeting_id=$1", [id]);
+      for (const { user_id } of participants.rows) await client.query(`INSERT INTO notifications (user_id,title,message,type,project_id,client_meeting_id)
+        SELECT $1,$2,$3,'client_meeting_change',$4,$5 WHERE COALESCE((SELECT client_meetings FROM user_notification_preferences WHERE user_id=$1),true)`, [user_id, nowCancelled ? "Client meeting cancelled" : "Client meeting rescheduled", nowCancelled ? `${old.title} with ${old.client_name} was cancelled.` : `${old.title} with ${old.client_name} was rescheduled.`, input.projectId ?? old.project_id, id]);
+      if (moved && input.status === undefined) await client.query("UPDATE client_meetings SET status='Rescheduled' WHERE id=$1", [id]);
+    }
+    await client.query("COMMIT");
+    return getClientMeeting(id);
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
+}
+
+export async function getClientMeetingPreferences(userId: number) {
+  const { rows } = await pool.query("INSERT INTO user_notification_preferences (user_id) VALUES ($1) ON CONFLICT (user_id) DO UPDATE SET user_id=EXCLUDED.user_id RETURNING client_meetings AS \"clientMeetings\", meeting_reminders AS \"meetingReminders\"", [userId]);
+  return rows[0];
+}
+export async function updateClientMeetingPreferences(userId: number, clientMeetings: boolean, meetingReminders: boolean) {
+  const { rows } = await pool.query("INSERT INTO user_notification_preferences (user_id,client_meetings,meeting_reminders) VALUES ($1,$2,$3) ON CONFLICT (user_id) DO UPDATE SET client_meetings=EXCLUDED.client_meetings, meeting_reminders=EXCLUDED.meeting_reminders, updated_at=NOW() RETURNING client_meetings AS \"clientMeetings\", meeting_reminders AS \"meetingReminders\"", [userId, clientMeetings, meetingReminders]);
+  return rows[0];
+}
+
+export async function runClientMeetingReminderSweep() {
+  await pool.query(`WITH inserted AS (
+    INSERT INTO client_meeting_reminder_events (meeting_id,user_id,reminder_at)
+    SELECT m.id, target.user_id, m.starts_at - INTERVAL '30 minutes'
+    FROM client_meetings m
+    CROSS JOIN LATERAL (SELECT m.organizer_id AS user_id UNION SELECT mp.user_id FROM client_meeting_participants mp WHERE mp.meeting_id=m.id) target
+    LEFT JOIN user_notification_preferences pref ON pref.user_id=target.user_id
+    WHERE m.status IN ('Scheduled','Rescheduled') AND m.starts_at > NOW()
+      AND m.starts_at BETWEEN NOW() + INTERVAL '25 minutes' AND NOW() + INTERVAL '35 minutes'
+      AND COALESCE(pref.meeting_reminders,true)
+    ON CONFLICT DO NOTHING RETURNING meeting_id,user_id
+  )
+  INSERT INTO notifications (user_id,title,message,type,project_id,client_meeting_id)
+  SELECT inserted.user_id,'Client meeting reminder',m.title || ' with ' || m.client_name || ' starts in 30 minutes.','client_meeting_reminder',m.project_id,m.id
+  FROM inserted JOIN client_meetings m ON m.id=inserted.meeting_id`);
 }
 
 export async function markNotificationRead(id: number, userId: number) {
@@ -1897,10 +2348,58 @@ export async function markAllNotificationsRead(userId: number) {
   return { success: true };
 }
 
+export async function runTaskDeadlineReminderSweep() {
+  const result = await pool.query(`
+    WITH targets AS (
+      SELECT t.id AS task_id, t.project_id, t.task_code, t.title, t.due_date, recipient.user_id,
+        CASE
+          WHEN t.due_date = CURRENT_DATE + 1 THEN '24h'
+          WHEN t.due_date = CURRENT_DATE AND LOCALTIME >= TIME '23:55' THEN 'at_deadline'
+          WHEN t.due_date = CURRENT_DATE AND LOCALTIME >= TIME '22:59' THEN '1h'
+          WHEN t.due_date < CURRENT_DATE THEN 'overdue:' || CURRENT_DATE::text
+        END AS stage
+      FROM tasks t
+      CROSS JOIN LATERAL (
+        SELECT DISTINCT candidate.user_id FROM (
+          SELECT t.assigned_to_user_id AS user_id
+          UNION ALL SELECT t.assigned_by_user_id
+          UNION ALL SELECT t.reviewer_user_id
+          UNION ALL SELECT p.manager_id FROM projects p WHERE p.id = t.project_id
+          UNION ALL SELECT p.lead_id FROM projects p WHERE p.id = t.project_id
+          UNION ALL SELECT team.manager_id FROM teams team JOIN team_members tm ON tm.team_id = team.id WHERE tm.user_id = t.assigned_to_user_id
+          UNION ALL SELECT team.lead_id FROM teams team JOIN team_members tm ON tm.team_id = team.id WHERE tm.user_id = t.assigned_to_user_id
+          UNION ALL SELECT u.id FROM users u WHERE u.role = 'Admin' AND u.is_active
+        ) candidate WHERE candidate.user_id IS NOT NULL
+      ) recipient
+      WHERE t.due_date IS NOT NULL AND t.status <> 'Completed' AND t.completed_at IS NULL
+        AND (t.due_date = CURRENT_DATE + 1 OR (t.due_date = CURRENT_DATE AND LOCALTIME >= TIME '22:59') OR t.due_date < CURRENT_DATE)
+    ), inserted AS (
+      INSERT INTO task_deadline_reminder_events (task_id, user_id, stage, due_date)
+      SELECT task_id, user_id, stage, due_date FROM targets
+      ON CONFLICT DO NOTHING
+      RETURNING task_id, user_id, stage, due_date
+    )
+    INSERT INTO notifications (user_id, title, message, type, task_id, project_id)
+    SELECT inserted.user_id,
+      CASE WHEN inserted.stage = '24h' THEN 'Task due tomorrow'
+           WHEN inserted.stage = '1h' THEN 'Task due in about one hour'
+           WHEN inserted.stage = 'at_deadline' THEN 'Task deadline reached'
+           ELSE 'Task overdue' END,
+      CASE WHEN inserted.stage = '24h' THEN 'Task ' || targets.task_code || ' (' || targets.title || ') is due tomorrow.'
+           WHEN inserted.stage = '1h' THEN 'Task ' || targets.task_code || ' (' || targets.title || ') is due today.'
+           WHEN inserted.stage = 'at_deadline' THEN 'Task ' || targets.task_code || ' (' || targets.title || ') has reached its due date and is not complete.'
+           ELSE 'Task ' || targets.task_code || ' (' || targets.title || ') is overdue.' END,
+      'deadline', inserted.task_id, targets.project_id
+    FROM inserted JOIN targets ON targets.task_id = inserted.task_id AND targets.user_id = inserted.user_id AND targets.stage = inserted.stage AND targets.due_date = inserted.due_date
+    RETURNING id
+  `);
+  return result.rowCount ?? 0;
+}
+
 export async function getTeamWorkloadAnalytics(viewer: AccessUser) {
-  const userVisibility = viewer.role === "Admin"
+  const userVisibility = (viewer.role === "Admin" || viewer.role === "Superadmin")
     ? "TRUE"
-    : viewer.role === "Individual"
+    : viewer.role === "Employee"
     ? "u.id = $1"
     : `(u.id = $1 OR EXISTS (
         SELECT 1 FROM team_members target_membership
@@ -1909,7 +2408,7 @@ export async function getTeamWorkloadAnalytics(viewer: AccessUser) {
           AND (authorized_team.manager_id = $1 OR authorized_team.lead_id = $1)
       ))`;
   const taskVisibility = taskVisibilityClause(viewer, "visible_task", "visible_project", 2);
-  const values = viewer.role === "Admin" ? taskVisibility.values : [viewer.id, ...taskVisibility.values];
+  const values = (viewer.role === "Admin" || viewer.role === "Superadmin") ? taskVisibility.values : [viewer.id, ...taskVisibility.values];
   const { rows } = await pool.query(`
     SELECT 
       u.id AS "userId",
@@ -1963,9 +2462,9 @@ export async function getDashboardMetrics(viewer: AccessUser) {
     `SELECT COUNT(*) FROM projects p WHERE p.status = 'Active' AND ${projectScope.sql}`,
     projectScope.values,
   );
-  const userScope = viewer.role === "Admin"
+  const userScope = (viewer.role === "Admin" || viewer.role === "Superadmin")
     ? { sql: "TRUE", values: [] as unknown[] }
-    : viewer.role === "Individual"
+    : viewer.role === "Employee"
     ? { sql: "u.id = $1", values: [viewer.id] }
     : {
         sql: `(u.id = $1 OR EXISTS (
@@ -1985,7 +2484,7 @@ export async function getDashboardMetrics(viewer: AccessUser) {
     WHERE $1::integer IS NULL OR t.manager_id = $1 OR t.lead_id = $1 OR EXISTS (
       SELECT 1 FROM team_members tm WHERE tm.team_id = t.id AND tm.user_id = $1
     )
-  `, [viewer.role === "Admin" ? null : viewer.id]);
+  `, [(viewer.role === "Admin" || viewer.role === "Superadmin") ? null : viewer.id]);
   const teamsCount = Number(teamsCountRes.rows[0].count);
 
   let personalMetrics = null;
@@ -2047,7 +2546,7 @@ export async function getDashboardMetrics(viewer: AccessUser) {
 export async function listOrganizationActivity(viewer: AccessUser) {
   const taskScope = taskVisibilityClause(viewer, "t", "p", 1);
   const projectScope = projectVisibilityClause(viewer, "p", 1);
-  const userScope = viewer.role === "Admin"
+  const userScope = (viewer.role === "Admin" || viewer.role === "Superadmin")
     ? "TRUE"
     : `(uah.actor_user_id = $1 OR EXISTS (
         SELECT 1 FROM users target_user
@@ -2057,7 +2556,7 @@ export async function listOrganizationActivity(viewer: AccessUser) {
             SELECT 1 FROM team_members tm WHERE tm.team_id = managed_team.id AND tm.user_id = target_user.id
           ))
       ))`;
-  const userValues = viewer.role === "Admin" ? [] : [viewer.id];
+  const userValues = (viewer.role === "Admin" || viewer.role === "Superadmin") ? [] : [viewer.id];
   const [taskEvents, projectEvents, userEvents] = await Promise.all([
     pool.query(`
       SELECT tah.id, tah.task_id AS "entityId", t.title AS "entityName", tah.action,
@@ -2101,7 +2600,7 @@ export async function deleteOrganizationActivityEvent(
   eventType: "task" | "project" | "employee",
   eventId: number,
 ) {
-  if (!Number.isSafeInteger(eventId) || eventId < 1 || (viewer.role !== "Admin" && viewer.role !== "Team Lead")) {
+  if (!Number.isSafeInteger(eventId) || eventId < 1 || ((viewer.role !== "Admin" && viewer.role !== "Superadmin") && viewer.role !== "Lead")) {
     return false;
   }
 
@@ -2127,7 +2626,7 @@ export async function deleteOrganizationActivityEvent(
     return (result.rowCount ?? 0) > 0;
   }
 
-  const result = viewer.role === "Admin"
+  const result = (viewer.role === "Admin" || viewer.role === "Superadmin")
     ? await pool.query("DELETE FROM user_audit_history WHERE id = $1", [eventId])
     : await pool.query(`
         DELETE FROM user_audit_history uah
@@ -2150,16 +2649,39 @@ export async function deleteOrganizationActivityEvent(
 export async function listProjectAllotments() {
   const { rows } = await pool.query<ProjectAllotment>(`
     SELECT
-      id,
-      serial_number AS "serialNumber",
-      employee_name AS "employeeName",
-      project,
-      task_assigned AS "taskAssigned",
-      assistance_by AS "assistanceBy",
-      progress,
-      repository_url AS "repositoryUrl"
-    FROM project_allotments
-    ORDER BY serial_number, id
+      t.id,
+      row_number() OVER (ORDER BY t.created_at, t.id)::integer AS "serialNumber",
+      assigned.name AS "employeeName",
+      p.name AS "project",
+      t.title AS "taskAssigned",
+      ARRAY[]::text[] AS "assistanceBy",
+      CASE WHEN t.status = 'Completed' THEN 'Completed'
+           WHEN t.status = 'Blocked' THEN 'Blocked'
+           WHEN t.status IN ('In Progress', 'In Review') THEN 'In Progress' ELSE 'Not Started' END AS progress,
+      t.repository_url AS "repositoryUrl",
+      t.id AS "taskId",
+      assigner.name AS "assignedBy",
+      p.name AS "projectName",
+      lead.name AS "projectLead",
+      COALESCE(members.names, ARRAY[]::text[]) AS "teamMembers",
+      to_char(t.created_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS "assignmentDate",
+      to_char(t.completed_at, 'YYYY-MM-DD') AS "completionDate",
+      to_char(t.due_date, 'YYYY-MM-DD') AS "dueDate",
+      t.progress_percent AS "progressPercent",
+      array_remove(ARRAY[t.repository_url, t.pull_request_url], NULL) AS "relatedLinks",
+      COALESCE(NULLIF(t.blocker_reason, ''), t.description) AS remarks,
+      t.status AS "taskStatus"
+    FROM tasks t
+    JOIN projects p ON p.id = t.project_id
+    JOIN users assigned ON assigned.id = t.assigned_to_user_id
+    JOIN users assigner ON assigner.id = t.assigned_by_user_id
+    LEFT JOIN users lead ON lead.id = p.lead_id
+    LEFT JOIN LATERAL (
+      SELECT array_agg(DISTINCT member.name ORDER BY member.name) AS names
+      FROM project_members pm JOIN users member ON member.id = pm.user_id
+      WHERE pm.project_id = p.id AND member.is_active
+    ) members ON true
+    ORDER BY t.created_at, t.id
   `);
   return rows;
 }
@@ -2303,10 +2825,10 @@ export async function updateProjectAllotmentAssistance(id: number, assistanceBy:
 export async function listDailyProgressReports(reportDate: string, viewer: AccessUser) {
   const values: unknown[] = [reportDate];
   let visibility = "TRUE";
-  if (viewer.role === "Individual") {
+  if (viewer.role === "Employee") {
     visibility = "d.user_id = $2";
     values.push(viewer.id);
-  } else if (viewer.role !== "Admin") {
+  } else if ((viewer.role !== "Admin" && viewer.role !== "Superadmin")) {
     const projectScope = projectVisibilityClause(viewer, "visible_project", 3);
     visibility = `(d.user_id = $2 OR EXISTS (
       SELECT 1 FROM team_members actor_membership

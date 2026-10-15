@@ -1,4 +1,4 @@
-export type UserRole = "Admin" | "Manager" | "Team Lead" | "Individual";
+export type UserRole = "Superadmin" | "Admin" | "Lead" | "Employee";
 export type TaskPriority = "Low" | "Medium" | "High" | "Urgent";
 export type TaskStatus = "Backlog" | "To Do" | "In Progress" | "In Review" | "Completed" | "Blocked";
 export type ReviewDecision = "Approved" | "Changes Requested";
@@ -53,8 +53,25 @@ export type Team = {
   managerId: number | null;
   managerName?: string | null;
   leadId: number | null;
+  departmentId?: number | null;
+  departmentName?: string | null;
+  isActive: boolean;
   leadName?: string | null;
   memberCount?: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Department = {
+  id: number;
+  name: string;
+  description: string | null;
+  headUserId: number | null;
+  headName: string | null;
+  isActive: boolean;
+  activeMemberCount: number;
+  inactiveMemberCount: number;
+  teamCount: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -173,8 +190,20 @@ export type Notification = {
   type: string;
   taskId: number | null;
   projectId: number | null;
+  clientMeetingId?: number | null;
   isRead: boolean;
   createdAt: string;
+};
+
+export type ClientMeeting = {
+  id: number; title: string; clientName: string; clientContact: string | null; startsAt: string; endsAt: string;
+  timeZone: string; meetingType: "Online" | "In-person"; meetingLink: string | null; location: string | null;
+  agenda: string; description: string; organizerId: number; organizerName: string; departmentId: number | null;
+  departmentName: string | null; projectId: number | null; projectName: string | null; taskId: number | null;
+  taskTitle: string | null; status: "Scheduled" | "Completed" | "Cancelled" | "Rescheduled";
+  minutes: string; decisions: string; clientFeedback: string; actionItems: string; resultingTaskId: number | null;
+  followUpAssigneeId: number | null; followUpDeadline: string | null;
+  participants: { id: number; name: string; email: string }[];
 };
 
 export type WorkloadMember = {
@@ -261,6 +290,18 @@ export type ProjectAllotment = {
   assistanceBy: string[];
   progress: TaskProgress;
   repositoryUrl: string | null;
+  taskId?: number;
+  assignedBy?: string;
+  projectName?: string;
+  projectLead?: string;
+  teamMembers?: string[];
+  assignmentDate?: string;
+  completionDate?: string | null;
+  dueDate?: string | null;
+  progressPercent?: number;
+  relatedLinks?: string[];
+  remarks?: string;
+  taskStatus?: TaskStatus;
 };
 
 export type NewProjectAllotment = {
@@ -408,15 +449,50 @@ export function hideInactiveEmployeeProfile(id: number) {
 }
 
 // Teams APIs
+export function getDepartments() {
+  return request<Department[]>("/api/departments");
+}
+
+export function createDepartment(input: { name: string; description?: string; headUserId?: number | null }) {
+  return request<Department>("/api/departments", { method: "POST", body: JSON.stringify(input) });
+}
+
+export function updateDepartment(id: number, input: { name: string; description?: string; headUserId?: number | null }) {
+  return request<Department>(`/api/departments/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export function setDepartmentActive(id: number, isActive: boolean) {
+  return request<{ success: boolean }>(`/api/departments/${id}`, { method: "PATCH", body: JSON.stringify({ isActive }) });
+}
+
+export function getClientMeetings() { return request<ClientMeeting[]>("/api/client-meetings"); }
+export function getClientMeetingParticipants() { return request<User[]>("/api/client-meetings/participants"); }
+export function getClientMeetingOrganizers() { return request<Array<Pick<User, "id" | "name" | "role" | "isActive">>>("/api/client-meetings/organizers"); }
+export function getClientMeetingDepartments() { return request<Array<{ id: number; name: string }>>("/api/client-meetings/departments"); }
+export function createClientMeeting(input: Record<string, unknown>) {
+  return request<ClientMeeting>("/api/client-meetings", { method: "POST", body: JSON.stringify(input) });
+}
+export function updateClientMeeting(id: number, input: Record<string, unknown>) {
+  return request<ClientMeeting>(`/api/client-meetings/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+export function getClientMeetingPreferences() { return request<{ clientMeetings: boolean; meetingReminders: boolean }>("/api/notifications/preferences"); }
+export function updateClientMeetingPreferences(input: { clientMeetings: boolean; meetingReminders: boolean }) {
+  return request<{ clientMeetings: boolean; meetingReminders: boolean }>("/api/notifications/preferences", { method: "PATCH", body: JSON.stringify(input) });
+}
+
 export function getTeams() {
   return request<Team[]>("/api/teams");
 }
 
-export function createTeam(teamData: { name: string; description?: string; managerId?: number; leadId?: number }) {
+export function createTeam(teamData: { name: string; description?: string; managerId?: number; leadId?: number; departmentId?: number }) {
   return request<Team>("/api/teams", {
     method: "POST",
     body: JSON.stringify(teamData),
   });
+}
+
+export function setTeamActive(id: number, isActive: boolean) {
+  return request<{ success: boolean }>(`/api/teams/${id}`, { method: "PATCH", body: JSON.stringify({ isActive }) });
 }
 
 // Projects APIs

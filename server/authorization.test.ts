@@ -27,7 +27,7 @@ after(async () => {
 });
 
 test("individual project, task, directory, and dashboard data is scoped", async () => {
-  const employee = await activeUser("Individual");
+  const employee = await activeUser("Employee");
   const [allProjects, visibleProjects, allTasks, visibleTasks, visibleUsers, metrics] = await Promise.all([
     listProjects(admin),
     listProjects(employee),
@@ -57,7 +57,7 @@ test("individual project, task, directory, and dashboard data is scoped", async 
 });
 
 test("manager analytics contain only visible team members and projects", async () => {
-  const lead = await activeUser("Team Lead");
+  const lead = await activeUser("Lead");
   const [visibleProjects, workload, metrics] = await Promise.all([
     listProjects(lead),
     getTeamWorkloadAnalytics(lead),
@@ -73,9 +73,9 @@ test("manager analytics contain only visible team members and projects", async (
 });
 
 test("individual contributors cannot deactivate another employee", async () => {
-  const employee = await activeUser("Individual");
+  const employee = await activeUser("Employee");
   const users = await listUsers(admin);
-  const target = users.find((user) => user.role === "Individual" && user.isActive && user.id !== employee.id);
+  const target = users.find((user) => user.role === "Employee" && user.isActive && user.id !== employee.id);
   if (!target) return;
 
   const result = await deactivateUser(employee, target.id, undefined, "authorization test");

@@ -1,4 +1,5 @@
-﻿import Login from "./Login";
+import Login from "./Login";
+import { zonedWallTimeToIso } from "./calendarUtils";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
@@ -48,6 +49,8 @@ import {
   addSubtask,
   addTaskComment,
   createProject,
+  createDepartment,
+  createTeam,
   createTask,
   createUser,
   deactivateEmployee,
@@ -59,6 +62,14 @@ import {
   getDailyProgressReports,
   getDashboardMetrics,
   getNotifications,
+  getClientMeetings,
+  getClientMeetingParticipants,
+  getClientMeetingOrganizers,
+  getClientMeetingDepartments,
+  getClientMeetingPreferences,
+  updateClientMeetingPreferences,
+  createClientMeeting,
+  updateClientMeeting,
   getProjectAllotments,
   getProjects,
   getTaskActivity,
@@ -68,6 +79,7 @@ import {
   getTasks,
   getTeamWorkloadAnalytics,
   getTeams,
+  getDepartments,
   getUsers,
   hideInactiveEmployeeProfile,
   logout,
@@ -79,9 +91,11 @@ import {
   taskStatusOptions,
   toggleSubtask,
   type DailyProgressReport,
+  type Department,
   type ActivityEvent,
   type DashboardMetrics,
   type Notification,
+  type ClientMeeting,
   type Project,
   type ProjectAllotment,
   type ReviewDecision,
@@ -96,6 +110,9 @@ import {
   type UserRole,
   type WorkloadMember,
   updateTask,
+  updateDepartment,
+  setDepartmentActive,
+  setTeamActive,
 } from "./api";
 
 import CompanyLogo from "./CompanyLogo";
@@ -146,10 +163,10 @@ const priorityBadgeStyles: Record<TaskPriority, { bg: string; text: string }> = 
 };
 
 const roleBadgeStyles: Record<UserRole, { bg: string; text: string; icon: LucideIcon }> = {
+  Superadmin: { bg: "bg-violet-100 text-violet-900 border-violet-300 font-black", text: "Superadmin", icon: ShieldAlert },
   Admin: { bg: "bg-emerald-50 text-emerald-800 border-emerald-300 font-bold", text: "Admin", icon: ShieldAlert },
-  Manager: { bg: "bg-teal-50 text-teal-800 border-teal-200", text: "Manager / Lead", icon: Briefcase },
-  "Team Lead": { bg: "bg-emerald-50 text-emerald-700 border-emerald-200", text: "Team Lead", icon: Users },
-  Individual: { bg: "bg-slate-100 text-slate-700 border-slate-200", text: "Individual Member", icon: User },
+  Lead: { bg: "bg-teal-50 text-teal-800 border-teal-200", text: "Lead", icon: Briefcase },
+  Employee: { bg: "bg-slate-100 text-slate-700 border-slate-200", text: "Employee", icon: User },
 };
 
 type ViewMode =
@@ -157,6 +174,7 @@ type ViewMode =
   | "my-tasks"
   | "all-tasks"
   | "projects"
+  | "departments"
   | "team-management"
   | "workload"
   | "daily-reports"
@@ -171,23 +189,44 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(initialUser);
   const [usersList, setUsersList] = useState<AppUser[]>([]);
   const [teamsList, setTeamsList] = useState<Team[]>([]);
+  const [departmentsList, setDepartmentsList] = useState<Department[]>([]);
   const [projectsList, setProjectsList] = useState<Project[]>([]);
   const [tasksList, setTasksList] = useState<Task[]>([]);
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [workloadData, setWorkloadData] = useState<WorkloadMember[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [clientMeetings, setClientMeetings] = useState<ClientMeeting[]>([]);
+  const [meetingParticipantUsers, setMeetingParticipantUsers] = useState<AppUser[]>([]);
+  const [meetingOrganizerUsers, setMeetingOrganizerUsers] = useState<Array<Pick<AppUser, "id" | "name" | "role" | "isActive">>>([]);
+  const [meetingDepartments, setMeetingDepartments] = useState<Array<{ id: number; name: string }>>([]);
+  const [meetingNotificationPreferences, setMeetingNotificationPreferences] = useState({ clientMeetings: true, meetingReminders: true });
+  const [meetingFormOpen, setMeetingFormOpen] = useState(false);
+  const [editingMeetingId, setEditingMeetingId] = useState<number | null>(null);
+  const [selectedMeeting, setSelectedMeeting] = useState<ClientMeeting | null>(null);
+  const [meetingForm, setMeetingForm] = useState({ title: "", clientName: "", clientContact: "", date: "", startTime: "", endTime: "", timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC", meetingType: "Online" as "Online" | "In-person", meetingLink: "", location: "", agenda: "", description: "", organizerId: initialUser.id, participantIds: [] as number[], projectId: 0, taskId: 0, departmentId: 0 });
+  const [meetingNotesForm, setMeetingNotesForm] = useState({ minutes: "", decisions: "", clientFeedback: "", actionItems: "", resultingTaskId: 0, followUpAssigneeId: 0, followUpDeadline: "" });
+  const [selectedCalendarProject, setSelectedCalendarProject] = useState<Project | null>(null);
+  const [meetingFeedback, setMeetingFeedback] = useState("");
   const [allotments, setAllotments] = useState<ProjectAllotment[]>([]);
   const [dailyReports, setDailyReports] = useState<DailyProgressReport[]>([]);
   const [activityEvents, setActivityEvents] = useState<ActivityEvent[]>([]);
 
   // Navigation & UI controls
   const [currentView, setCurrentView] = useState<ViewMode>("overview");
+  const [departmentSearch, setDepartmentSearch] = useState("");
+  const [departmentStatusFilter, setDepartmentStatusFilter] = useState("Active");
+  const [departmentModalOpen, setDepartmentModalOpen] = useState(false);
+  const [editingDepartmentId, setEditingDepartmentId] = useState<number | null>(null);
+  const [departmentFormData, setDepartmentFormData] = useState({ name: "", description: "", headUserId: 0 });
+  const [teamModalOpen, setTeamModalOpen] = useState(false);
+  const [teamFormData, setTeamFormData] = useState({ name: "", description: "", departmentId: 0, leadId: 0 });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const dataRefreshGeneration = useRef(0);
   const [errorMessage, setErrorMessage] = useState("");
   const [successMessage, setSuccessMessage] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notificationFilter, setNotificationFilter] = useState<"All" | "Unread" | "Tasks" | "Deadlines" | "Reviews" | "Meetings">("All");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -206,6 +245,17 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
   const [employeeTeamFilter, setEmployeeTeamFilter] = useState("All");
   const [employeeStatusFilter, setEmployeeStatusFilter] = useState("All");
   const [employeePage, setEmployeePage] = useState(0);
+  const [allotmentSearch, setAllotmentSearch] = useState("");
+  const [allotmentPage, setAllotmentPage] = useState(0);
+  const [progressDepartment, setProgressDepartment] = useState("All");
+  const [progressTeam, setProgressTeam] = useState("All");
+  const [progressEmployee, setProgressEmployee] = useState("All");
+  const [progressLead, setProgressLead] = useState("All");
+  const [progressProject, setProgressProject] = useState("All");
+  const [progressStatus, setProgressStatus] = useState("All");
+  const [progressPriority, setProgressPriority] = useState("All");
+  const [progressFrom, setProgressFrom] = useState("");
+  const [progressTo, setProgressTo] = useState("");
   const [selectedDepartment, setSelectedDepartment] = useState<string | null>(null);
   const [reportDate, setReportDate] = useState<string>(localDateString());
   const [calendarDate, setCalendarDate] = useState(() => new Date());
@@ -290,7 +340,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
     username: "",
     email: "",
     password: "",
-    role: "Individual" as UserRole,
+    role: "Employee" as UserRole,
     department: "Technical",
     designation: "Software Engineer",
     teamId: 0,
@@ -330,13 +380,19 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
       await Promise.all([
         loadSection(getUsers(), setUsersList),
         loadSection(getTeams(), setTeamsList),
+        ...((u.role === "Admin" || u.role === "Superadmin") ? [loadSection(getDepartments(), setDepartmentsList)] : []),
         loadSection(getProjects(), setProjectsList),
         loadSection(getTasks(), setTasksList),
         loadSection(getDashboardMetrics(), setMetrics),
         ...(currentView === "workload" || currentView === "analytics"
           ? [loadSection(getTeamWorkloadAnalytics(), setWorkloadData)] : []),
         loadSection(getNotifications(), setNotifications),
-        ...(u.role === "Admin" && currentView === "allotments"
+        loadSection(getClientMeetings(), setClientMeetings),
+        loadSection(getClientMeetingParticipants(), setMeetingParticipantUsers),
+        loadSection(getClientMeetingOrganizers(), setMeetingOrganizerUsers),
+        loadSection(getClientMeetingDepartments(), setMeetingDepartments),
+        loadSection(getClientMeetingPreferences(), setMeetingNotificationPreferences),
+        ...((u.role === "Admin" || u.role === "Superadmin") && currentView === "allotments"
           ? [loadSection(getProjectAllotments(), setAllotments)] : []),
       ]);
       // React batches these updates into one commit, avoiding a layout pass for
@@ -376,7 +432,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
     if (currentView === "workload" || currentView === "analytics") {
       getTeamWorkloadAnalytics().then((data) => { if (active) setWorkloadData(data); }).catch(fail);
     }
-    if (currentView === "allotments" && currentUser.role === "Admin") {
+    if (currentView === "allotments" && (currentUser.role === "Admin" || currentUser.role === "Superadmin")) {
       getProjectAllotments().then((data) => { if (active) setAllotments(data); }).catch(fail);
     }
     return () => { active = false; };
@@ -450,6 +506,9 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
       setMetrics(null);
       setWorkloadData([]);
       setNotifications([]);
+      setClientMeetings([]);
+      setMeetingParticipantUsers([]);
+      setMeetingDepartments([]);
       setAllotments([]);
       setDailyReports([]);
       setActivityEvents([]);
@@ -505,6 +564,26 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
     });
     return events;
   }, [calendarTasks]);
+  const calendarMeetingsByDate = useMemo(() => {
+    const events = new Map<string, ClientMeeting[]>();
+    clientMeetings.filter((meeting) => meeting.status !== "Cancelled").forEach((meeting) => {
+      if (calendarProjectFilter !== "All" && String(meeting.projectId || "") !== calendarProjectFilter) return;
+      const parts = new Intl.DateTimeFormat("en-CA", { timeZone: meeting.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(meeting.startsAt));
+      const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+      const key = `${values.year}-${values.month}-${values.day}`;
+      events.set(key, [...(events.get(key) || []), meeting]);
+    });
+    return events;
+  }, [clientMeetings, calendarProjectFilter]);
+  const calendarProjectsByDate = useMemo(() => {
+    const events = new Map<string, Project[]>();
+    projectsList.filter((project) => project.targetDate).forEach((project) => {
+      if (calendarProjectFilter !== "All" && String(project.id) !== calendarProjectFilter) return;
+      const date = project.targetDate!.slice(0, 10);
+      events.set(date, [...(events.get(date) || []), project]);
+    });
+    return events;
+  }, [projectsList, calendarProjectFilter]);
 
   const calendarPeriodStart = calendarMode === "Month"
     ? startOfWeek(new Date(calendarDate.getFullYear(), calendarDate.getMonth(), 1))
@@ -513,10 +592,12 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
   const calendarDays = Array.from({ length: calendarDayCount }, (_, index) => shiftDate(calendarPeriodStart, index));
   const calendarPeriodEndKey = localDateString(calendarDays[calendarDays.length - 1]);
   const calendarVisibleTasks = calendarTasks.filter((task) => task.dueDate! >= localDateString(calendarPeriodStart) && task.dueDate! <= calendarPeriodEndKey);
+  const calendarVisibleMeetings = clientMeetings.filter((meeting) => meeting.status !== "Cancelled" && (calendarProjectFilter === "All" || String(meeting.projectId || "") === calendarProjectFilter) && (() => { const parts = new Intl.DateTimeFormat("en-CA", { timeZone: meeting.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(meeting.startsAt)); const values = Object.fromEntries(parts.map((part) => [part.type, part.value])); const key = `${values.year}-${values.month}-${values.day}`; return key >= localDateString(calendarPeriodStart) && key <= calendarPeriodEndKey; })());
+  const calendarVisibleProjects = projectsList.filter((project) => project.targetDate && (calendarProjectFilter === "All" || String(project.id) === calendarProjectFilter) && project.targetDate.slice(0, 10) >= localDateString(calendarPeriodStart) && project.targetDate.slice(0, 10) <= calendarPeriodEndKey);
   const calendarHeading = calendarMode === "Day"
     ? calendarDate.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })
     : calendarMode === "Week"
-      ? `${calendarPeriodStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${shiftDate(calendarPeriodStart, 6).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
+      ? `${calendarPeriodStart.toLocaleDateString(undefined, { month: "short", day: "numeric" })}  ${shiftDate(calendarPeriodStart, 6).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
       : calendarDate.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 
   const calendarTaskTone = (task: Task) => {
@@ -533,9 +614,33 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
     });
   };
 
+  const handleSaveMeeting = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      const startsAt = zonedWallTimeToIso(meetingForm.date, meetingForm.startTime, meetingForm.timeZone);
+      const endsAt = zonedWallTimeToIso(meetingForm.date, meetingForm.endTime, meetingForm.timeZone);
+      if (new Date(endsAt) <= new Date(startsAt)) { setMeetingFeedback("End time must be after the start time."); return; }
+      const payload = { title: meetingForm.title.trim(), clientName: meetingForm.clientName.trim(), clientContact: meetingForm.clientContact.trim(), startsAt, endsAt, timeZone: meetingForm.timeZone, meetingType: meetingForm.meetingType, meetingLink: meetingForm.meetingLink.trim(), location: meetingForm.location.trim(), agenda: meetingForm.agenda, description: meetingForm.description, organizerId: meetingForm.organizerId, participantIds: meetingForm.participantIds, projectId: meetingForm.projectId || null, taskId: meetingForm.taskId || null, departmentId: meetingForm.departmentId || null };
+      if (editingMeetingId) await updateClientMeeting(editingMeetingId, payload);
+      else await createClientMeeting(payload);
+      setClientMeetings(await getClientMeetings());
+      setMeetingFormOpen(false); setEditingMeetingId(null); setMeetingFeedback("");
+      setMeetingForm((current) => ({ ...current, title: "", clientName: "", clientContact: "", date: "", startTime: "", endTime: "", meetingLink: "", location: "", agenda: "", description: "", participantIds: [], projectId: 0, taskId: 0, departmentId: 0 }));
+      setSuccessMessage(editingMeetingId ? "Meeting updated." : "Meeting scheduled. Participants have been notified.");
+    } catch (error: any) { setMeetingFeedback(error.message || "Unable to save this meeting."); }
+  };
+
+  const handleSaveMeetingNotes = async () => {
+    if (!selectedMeeting) return;
+    try {
+      const meeting = await updateClientMeeting(selectedMeeting.id, { ...meetingNotesForm, resultingTaskId: meetingNotesForm.resultingTaskId || null, followUpAssigneeId: meetingNotesForm.followUpAssigneeId || null, followUpDeadline: meetingNotesForm.followUpDeadline || null });
+      setSelectedMeeting(meeting); setClientMeetings(await getClientMeetings()); setMeetingFeedback("Meeting notes saved.");
+    } catch (error: any) { setMeetingFeedback(error.message || "Unable to save meeting notes."); }
+  };
+
   // Action Handlers
   const handleOpenCreateTask = () => {
-    if (!currentUser || currentUser.role === "Individual") {
+    if (!currentUser || currentUser.role === "Employee") {
       setErrorMessage("Individual contributors cannot create top-level tasks. Contact Team Lead or Manager.");
       return;
     }
@@ -543,7 +648,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
       title: "",
       description: "",
       projectId: projectsList[0]?.id || 0,
-      assignedToUserId: usersList.find((u) => u.role === "Individual")?.id || usersList[0]?.id || 0,
+      assignedToUserId: usersList.find((u) => u.role === "Employee")?.id || usersList[0]?.id || 0,
       reviewerUserId: currentUser.id,
       priority: "Medium",
       status: "To Do",
@@ -581,7 +686,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
 
     try {
       if (editingTaskId) {
-        const payload = role === "Individual"
+        const payload = role === "Employee"
           ? { title: taskFormData.title, description: taskFormData.description, priority: taskFormData.priority, dueDate: taskFormData.dueDate || null, acceptanceCriteria: taskFormData.acceptanceCriteria, repositoryUrl: taskFormData.repositoryUrl || null, pullRequestUrl: taskFormData.pullRequestUrl || null }
           : taskFormData;
         const updated = await updateTask(editingTaskId, payload);
@@ -803,7 +908,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
   };
 
   const handleHideInactiveProfile = async (user: AppUser) => {
-    if (role !== "Admin" || user.isActive || !window.confirm(`Remove ${user.name}'s inactive profile from the employee list? Their task history will be retained.`)) return;
+    if (!isAdminRole || user.isActive || !window.confirm(`Remove ${user.name}'s inactive profile from the employee list? Their task history will be retained.`)) return;
     try {
       await hideInactiveEmployeeProfile(user.id);
       setUsersList((users) => users.map((item) => item.id === user.id ? { ...item, isHiddenFromAdmin: true } : item));
@@ -815,13 +920,16 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
   };
 
   const openCreateProfile = () => {
+    const defaultDepartment = teamsList.find((team) => team.id === currentUser?.teamId)?.departmentName
+      || departmentsList.find((department) => department.isActive)?.name
+      || "Technical";
     setUserFormData({
       name: "",
       username: "",
       email: "",
       password: "",
-      role: "Individual",
-      department: "Technical",
+      role: "Employee",
+      department: defaultDepartment,
       designation: "Software Engineer",
       teamId: currentUser?.teamId || teamsList[0]?.id || 0,
       projectIds: [],
@@ -859,13 +967,14 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
   };
 
   // Determine authorized navigation items based on role
-  const role = currentUser?.role || "Individual";
-  const canManageProjects = role === "Admin" || role === "Manager";
-  const canManageUsers = role === "Admin" || role === "Team Lead";
-  const canManageEmployees = role === "Admin" || role === "Manager" || role === "Team Lead";
-  const canAssignTasks = role === "Admin" || role === "Manager" || role === "Team Lead";
-  const canRemoveTask = (_task: Task) => role === "Admin";
-  const canEditTask = (task: Task) => canAssignTasks || (role === "Individual" && task.assignedToUserId === currentUser?.id);
+  const role = currentUser?.role || "Employee";
+  const isAdminRole = role === "Admin" || role === "Superadmin";
+  const canManageProjects = isAdminRole || role === "Lead";
+  const canManageUsers = isAdminRole || role === "Lead";
+  const canManageEmployees = isAdminRole || role === "Lead";
+  const canAssignTasks = isAdminRole || role === "Lead";
+  const canRemoveTask = (_task: Task) => isAdminRole;
+  const canEditTask = (task: Task) => canAssignTasks || (role === "Employee" && task.assignedToUserId === currentUser?.id);
 
   const handleDeleteTask = async (task: Task) => {
     if (!canRemoveTask(task) || !window.confirm(`Remove task ${task.taskCode}? This will permanently delete its task history and comments.`)) return;
@@ -881,14 +990,14 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
 
   // Grouped Team Hierarchy for Team Management Module
   const teamLeadsManagers = useMemo(() => {
-    return usersList.filter((u) => u.role === "Manager" || u.role === "Team Lead");
+    return usersList.filter((u) => u.role === "Lead");
   }, [usersList]);
 
   const individualContributors = useMemo(() => {
     const query = employeeSearch.trim().toLocaleLowerCase();
     return usersList.filter((user) => {
-      if (user.role !== "Individual") return false;
-      if (role === "Admin" && user.isHiddenFromAdmin) return false;
+      if (user.role !== "Employee") return false;
+      if (isAdminRole && user.isHiddenFromAdmin) return false;
       if (employeeTeamFilter !== "All" && String(user.teamId || "") !== employeeTeamFilter) return false;
       if (employeeStatusFilter === "Active" && !user.isActive) return false;
       if (employeeStatusFilter === "Inactive" && user.isActive) return false;
@@ -900,19 +1009,93 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
   const adminUsers = useMemo(() => {
     return usersList.filter((u) => u.role === "Admin");
   }, [usersList]);
-  const departmentGroups = useMemo(() => {
-    return ["Sales", "Technical"].map((name) => ({
-      name,
-      members: usersList.filter((user) => user.department?.trim().toLocaleLowerCase() === name.toLocaleLowerCase()),
-    }));
-  }, [usersList]);
+  const superadminUsers = useMemo(() => usersList.filter((u) => u.role === "Superadmin"), [usersList]);
+  const departmentGroups = useMemo(() => departmentsList.filter((department) => department.isActive).map(({ name }) => ({
+    name,
+    members: usersList.filter((user) => user.department?.trim().toLocaleLowerCase() === name.toLocaleLowerCase()),
+  })), [departmentsList, usersList]);
   const activeDepartment = departmentGroups.find((department) => department.name === selectedDepartment) || null;
+  const filteredDepartments = useMemo(() => departmentsList.filter((department) =>
+    `${department.name} ${department.description || ""} ${department.headName || ""}`.toLocaleLowerCase().includes(departmentSearch.trim().toLocaleLowerCase())
+    && (departmentStatusFilter === "All" || department.isActive === (departmentStatusFilter === "Active"))
+  ), [departmentsList, departmentSearch, departmentStatusFilter]);
+  const filteredAllotments = useMemo(() => {
+    const query = allotmentSearch.trim().toLocaleLowerCase();
+    return allotments.filter((item) => !query || `${item.assignedBy || ""} ${item.projectName || item.project} ${item.projectLead || ""} ${item.teamMembers?.join(" ") || ""} ${item.taskAssigned} ${item.taskStatus || ""}`.toLocaleLowerCase().includes(query));
+  }, [allotments, allotmentSearch]);
+  const allotmentPageSize = 20;
+  const visibleAllotments = filteredAllotments.slice(allotmentPage * allotmentPageSize, (allotmentPage + 1) * allotmentPageSize);
+  const visibleNotifications = notifications.filter((notification) => {
+    if (notificationFilter === "Unread") return !notification.isRead;
+    if (notificationFilter === "Tasks") return Boolean(notification.taskId) && !["deadline", "deadline_change", "review", "review_request"].includes(notification.type);
+    if (notificationFilter === "Deadlines") return notification.type.startsWith("deadline");
+    if (notificationFilter === "Reviews") return notification.type.startsWith("review");
+    if (notificationFilter === "Meetings") return notification.type.startsWith("client_meeting");
+    return true;
+  });
+  const progressTasks = useMemo(() => tasksList.filter((task) => {
+    const assignee = usersList.find((user) => user.id === task.assignedToUserId);
+    const team = teamsList.find((candidate) => candidate.id === assignee?.teamId);
+    const assignmentDate = task.createdAt.slice(0, 10);
+    return (progressDepartment === "All" || assignee?.department === progressDepartment)
+      && (progressTeam === "All" || String(assignee?.teamId || "") === progressTeam)
+      && (progressEmployee === "All" || String(task.assignedToUserId) === progressEmployee)
+      && (progressLead === "All" || String(team?.leadId || "") === progressLead)
+      && (progressProject === "All" || String(task.projectId) === progressProject)
+      && (progressStatus === "All" || task.status === progressStatus)
+      && (progressPriority === "All" || task.priority === progressPriority)
+      && (!progressFrom || assignmentDate >= progressFrom)
+      && (!progressTo || assignmentDate <= progressTo);
+  }), [tasksList, usersList, teamsList, progressDepartment, progressTeam, progressEmployee, progressLead, progressProject, progressStatus, progressPriority, progressFrom, progressTo]);
   const employeePageSize = 9;
   const employeePageCount = Math.max(1, Math.ceil(individualContributors.length / employeePageSize));
   const employeePageUsers = individualContributors.slice(employeePage * employeePageSize, (employeePage + 1) * employeePageSize);
 
+  const handleSaveDepartment = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      const input = { name: departmentFormData.name.trim(), description: departmentFormData.description.trim(), headUserId: departmentFormData.headUserId || null };
+      if (editingDepartmentId) await updateDepartment(editingDepartmentId, input);
+      else await createDepartment(input);
+      setDepartmentsList(await getDepartments());
+      setDepartmentModalOpen(false);
+      setEditingDepartmentId(null);
+      setDepartmentFormData({ name: "", description: "", headUserId: 0 });
+      setSuccessMessage(editingDepartmentId ? "Department updated." : "Department created.");
+    } catch (error: any) { setErrorMessage(error.message || "Unable to save department."); }
+  };
+
+  const handleToggleDepartment = async (department: Department) => {
+    try {
+      await setDepartmentActive(department.id, !department.isActive);
+      setDepartmentsList(await getDepartments());
+      if (department.isActive) setSelectedDepartment(null);
+      setSuccessMessage(department.isActive ? "Department removed and moved to history." : "Department activated.");
+    } catch (error: any) { setErrorMessage(error.message || "Unable to update department."); }
+  };
+
+  const handleSaveTeam = async (event: React.FormEvent) => {
+    event.preventDefault();
+    try {
+      await createTeam({ name: teamFormData.name.trim(), description: teamFormData.description.trim(), departmentId: teamFormData.departmentId || undefined, leadId: teamFormData.leadId || undefined });
+      setTeamsList(await getTeams());
+      setTeamModalOpen(false);
+      setTeamFormData({ name: "", description: "", departmentId: 0, leadId: 0 });
+      setSuccessMessage("Team created.");
+    } catch (error: any) { setErrorMessage(error.message || "Unable to create team."); }
+  };
+
+  const handleToggleTeam = async (team: Team) => {
+    try {
+      await setTeamActive(team.id, !team.isActive);
+      setTeamsList(await getTeams());
+      setDepartmentsList(await getDepartments());
+      setSuccessMessage(team.isActive ? "Team deactivated." : "Team activated.");
+    } catch (error: any) { setErrorMessage(error.message || "Unable to update team."); }
+  };
+
   const handleDeleteActivityEvent = async (event: ActivityEvent) => {
-    if (role !== "Admin" && role !== "Team Lead") return;
+    if (!isAdminRole && role !== "Lead") return;
     if (!window.confirm("Remove this activity log entry? This cannot be undone.")) return;
     try {
       await deleteActivityLogEvent(event.id);
@@ -926,17 +1109,17 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
     ? tasksList.filter((task) => task.assignedToUserId === deactivationTarget.id && task.status !== "Completed").length
     : 0;
   const deactivationReplacementUsers = deactivationTarget
-    ? usersList.filter((user) => user.isActive && user.id !== deactivationTarget.id && (role === "Admin" || user.teamId === deactivationTarget.teamId))
+    ? usersList.filter((user) => user.isActive && user.id !== deactivationTarget.id && (isAdminRole || user.teamId === deactivationTarget.teamId))
     : [];
   const dashboardKpis: Array<{ label: string; value: number; icon: LucideIcon; tone: string; view: ViewMode; status?: string; due?: string }> = [
-    { label: role === "Individual" ? "My Assigned Tasks" : "Total Tasks", value: role === "Individual" ? metrics?.personal?.myTotalTasks || 0 : metrics?.totalTasks || 0, icon: ListTodo, tone: "text-slate-900", view: role === "Individual" ? "my-tasks" : "all-tasks" },
-    { label: "Completed", value: metrics?.completedTasks || 0, icon: CheckCircle2, tone: "text-emerald-600", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "Completed" },
-    { label: "In Progress", value: metrics?.inProgressTasks || 0, icon: Clock, tone: "text-teal-700", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "In Progress" },
-    { label: "Overdue", value: metrics?.overdueTasks || 0, icon: CalendarIcon, tone: "text-rose-600", view: role === "Individual" ? "my-tasks" : "all-tasks", due: "Overdue" },
-    { label: "Blocked", value: metrics?.blockedTasks || 0, icon: AlertOctagon, tone: "text-rose-700", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "Blocked" },
+    { label: role === "Employee" ? "My Assigned Tasks" : "Total Tasks", value: role === "Employee" ? metrics?.personal?.myTotalTasks || 0 : metrics?.totalTasks || 0, icon: ListTodo, tone: "text-slate-900", view: role === "Employee" ? "my-tasks" : "all-tasks" },
+    { label: "Completed", value: metrics?.completedTasks || 0, icon: CheckCircle2, tone: "text-emerald-600", view: role === "Employee" ? "my-tasks" : "all-tasks", status: "Completed" },
+    { label: "In Progress", value: metrics?.inProgressTasks || 0, icon: Clock, tone: "text-teal-700", view: role === "Employee" ? "my-tasks" : "all-tasks", status: "In Progress" },
+    { label: "Overdue", value: metrics?.overdueTasks || 0, icon: CalendarIcon, tone: "text-rose-600", view: role === "Employee" ? "my-tasks" : "all-tasks", due: "Overdue" },
+    { label: "Blocked", value: metrics?.blockedTasks || 0, icon: AlertOctagon, tone: "text-rose-700", view: role === "Employee" ? "my-tasks" : "all-tasks", status: "Blocked" },
     { label: "Active Projects", value: metrics?.totalProjects || 0, icon: FolderGit2, tone: "text-emerald-700", view: "projects" },
-    { label: role === "Individual" ? "My Tasks" : role === "Admin" ? "Employees" : "Team Members", value: role === "Individual" ? metrics?.personal?.myTotalTasks || 0 : metrics?.totalUsers || 0, icon: Users, tone: "text-slate-900", view: canManageEmployees ? "team-management" : "my-tasks" },
-    { label: "Pending", value: metrics?.pendingTasks || 0, icon: FileCheck, tone: "text-amber-700", view: role === "Individual" ? "my-tasks" : "all-tasks", status: "Pending" },
+    { label: role === "Employee" ? "My Tasks" : isAdminRole ? "Employees" : "Team Members", value: role === "Employee" ? metrics?.personal?.myTotalTasks || 0 : metrics?.totalUsers || 0, icon: Users, tone: "text-slate-900", view: canManageEmployees ? "team-management" : "my-tasks" },
+    { label: "Pending", value: metrics?.pendingTasks || 0, icon: FileCheck, tone: "text-amber-700", view: role === "Employee" ? "my-tasks" : "all-tasks", status: "Pending" },
   ];
   const maxTeamTasks = Math.max(1, ...workloadData.map((member) => member.totalTasks));
   const dueSoonDate = localDateString(new Date(Date.now() + 3 * 86400000));
@@ -973,7 +1156,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                 <input id="new-password" type={showNewPassword ? "text" : "password"} minLength={7} maxLength={8} autoComplete="new-password" required value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 pr-11 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100" />
                 <button type="button" aria-label={showNewPassword ? "Hide" : "Show"} onClick={() => setShowNewPassword((v) => !v)} className="absolute inset-y-0 right-0 px-3 text-slate-600 hover:text-slate-700"><Eye className="h-4 w-4" /></button>
               </div>
-              <p className="mt-1 text-xs text-slate-500">7–8 characters with at least one letter and one number.</p>
+              <p className="mt-1 text-xs text-slate-500">78 characters with at least one letter and one number.</p>
             </div>
             <div>
               <label htmlFor="confirm-password" className="mb-1.5 block text-sm font-semibold text-slate-700">Confirm new password</label>
@@ -1030,7 +1213,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
             >
               <Radio className="w-5 h-5" />
               {notifications.some((n) => !n.isRead) && (
-                <span className="absolute top-1.5 right-1.5 w-2.5 h-2.5 bg-indigo-500 rounded-full ring-2 ring-white" />
+                <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-indigo-600 px-1 text-center text-[9px] font-bold leading-4 text-white ring-2 ring-white">{notifications.filter((n) => !n.isRead).length}</span>
               )}
             </button>
 
@@ -1053,11 +1236,18 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                     Mark all read
                   </button>
                 </div>
+                <div className="mt-3 flex gap-1 overflow-x-auto pb-1">
+                  {(["All", "Unread", "Tasks", "Deadlines", "Reviews", "Meetings"] as const).map((filter) => <button key={filter} type="button" onClick={() => setNotificationFilter(filter)} className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold ${notificationFilter === filter ? "bg-indigo-600 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>{filter}</button>)}
+                </div>
+                <div className="mt-2 space-y-1 rounded-lg bg-slate-50 p-2 text-[10px] text-slate-600">
+                  <label className="flex items-center justify-between gap-2">Meeting updates<input type="checkbox" checked={meetingNotificationPreferences.clientMeetings} onChange={async (event) => { const next = { ...meetingNotificationPreferences, clientMeetings: event.target.checked }; setMeetingNotificationPreferences(await updateClientMeetingPreferences(next)); }} /></label>
+                  <label className="flex items-center justify-between gap-2">30 minute reminders<input type="checkbox" checked={meetingNotificationPreferences.meetingReminders} onChange={async (event) => { const next = { ...meetingNotificationPreferences, meetingReminders: event.target.checked }; setMeetingNotificationPreferences(await updateClientMeetingPreferences(next)); }} /></label>
+                </div>
                 <div className="divide-y divide-slate-100 max-h-80 overflow-y-auto mt-2">
-                  {notifications.length === 0 ? (
-                    <div className="text-center py-6 text-slate-600 text-xs">No notifications.</div>
+                  {visibleNotifications.length === 0 ? (
+                    <div className="text-center py-6 text-slate-600 text-xs">No notifications in this filter.</div>
                   ) : (
-                    notifications.map((n) => (
+                    visibleNotifications.map((n) => (
                       <div
                         key={n.id}
                         onClick={async () => {
@@ -1068,6 +1258,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                             );
                           }
                           if (n.taskId) setSelectedTaskId(n.taskId);
+                          if (n.clientMeetingId) { const meeting = clientMeetings.find((item) => item.id === n.clientMeetingId); if (meeting) { setSelectedMeeting(meeting); setMeetingNotesForm({ minutes: meeting.minutes, decisions: meeting.decisions, clientFeedback: meeting.clientFeedback, actionItems: meeting.actionItems, resultingTaskId: meeting.resultingTaskId || 0, followUpAssigneeId: meeting.followUpAssigneeId || 0, followUpDeadline: meeting.followUpDeadline || "" }); setCurrentView("calendar"); } }
                           setNotificationsOpen(false);
                         }}
                         className={`py-3 px-2 text-xs cursor-pointer rounded-lg transition ${
@@ -1104,7 +1295,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
 
       {/* Global Alerts */}
       {errorMessage && (
-        <div className="bg-rose-50 border-l-4 border-rose-500 p-3 mx-4 lg:mx-8 mt-4 rounded-r-lg flex items-center justify-between text-rose-800 text-xs sm:text-sm animate-in fade-in">
+        <div className="bg-rose-50 border-l-4 border-rose-500 p-3 mx-4 lg:ml-[17rem] lg:mr-8 mt-4 rounded-r-lg flex items-center justify-between text-rose-800 text-xs sm:text-sm animate-in fade-in">
           <div className="flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <span>{errorMessage}</span>
@@ -1116,7 +1307,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
       )}
 
       {successMessage && (
-        <div className="bg-emerald-50 border-l-4 border-emerald-500 p-3 mx-4 lg:mx-8 mt-4 rounded-r-lg flex items-center justify-between text-emerald-800 text-xs sm:text-sm animate-in fade-in">
+        <div className="bg-emerald-50 border-l-4 border-emerald-500 p-3 mx-4 lg:ml-[17rem] lg:mr-8 mt-4 rounded-r-lg flex items-center justify-between text-emerald-800 text-xs sm:text-sm animate-in fade-in">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 shrink-0" />
             <span>{successMessage}</span>
@@ -1134,7 +1325,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
         <aside
           id="workspace-navigation"
           aria-label="Workspace navigation"
-          className={`fixed inset-y-0 left-0 z-40 w-64 min-h-0 bg-white border-r border-slate-200 flex flex-col pt-16 lg:pt-0 transition-transform lg:fixed lg:translate-x-0 ${
+          className={`fixed inset-y-0 left-0 z-40 w-64 min-h-0 shrink-0 bg-white border-r border-slate-200 flex flex-col pt-16 lg:pt-0 transition-transform lg:translate-x-0 ${
             isMobileMenuOpen ? "translate-x-0" : "-translate-x-full"
           }`}
         >
@@ -1166,6 +1357,16 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               <span>Dashboard</span>
             </button>
 
+            {isAdminRole && (
+              <button
+                type="button"
+                onClick={() => { setCurrentView("departments"); setIsMobileMenuOpen(false); }}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${currentView === "departments" || currentView === "team-management" ? "bg-indigo-50 text-indigo-800 font-bold border border-indigo-200/60" : "text-slate-600 hover:bg-indigo-50/50 hover:text-indigo-900"}`}
+              >
+                <Briefcase className="w-4 h-4 text-indigo-500" />Departments
+              </button>
+            )}
+
             <button
               onClick={() => {
                 setCurrentView("my-tasks");
@@ -1188,7 +1389,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               )}
             </button>
 
-            {role !== "Individual" && (
+            {role !== "Employee" && (
               <button
                 onClick={() => {
                   setCurrentView("all-tasks");
@@ -1210,7 +1411,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               </button>
             )}
 
-            {role !== "Individual" && (
+            {role !== "Employee" && (
               <button
                 onClick={async () => {
                   setCurrentView("activity");
@@ -1252,22 +1453,6 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               </span>
             </button>
 
-            {canManageEmployees && (
-              <button
-                onClick={() => {
-                  setCurrentView("team-management");
-                  setIsMobileMenuOpen(false);
-                }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg transition ${
-                  currentView === "team-management"
-                    ? "bg-emerald-50 text-emerald-800 font-bold border border-emerald-200/60"
-                    : "text-slate-600 hover:bg-emerald-50/50 hover:text-emerald-900"
-                }`}
-              >
-                <Users className="w-4 h-4 text-indigo-500" />
-                <span>Employees & Teams</span>
-              </button>
-            )}
             {canManageUsers && (
               <button
                 onClick={openCreateProfile}
@@ -1278,7 +1463,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               </button>
             )}
 
-            {role !== "Individual" && (
+            {role !== "Employee" && (
             <button
               onClick={() => {
                 setCurrentView("workload");
@@ -1329,7 +1514,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               <span>Calendar</span>
             </button>
 
-            {role !== "Individual" && (
+            {role !== "Employee" && (
             <button
               onClick={() => {
                 setCurrentView("analytics");
@@ -1346,7 +1531,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
             </button>
             )}
 
-            {role === "Admin" && (
+            {isAdminRole && (
               <button
                 onClick={() => {
                   setCurrentView("allotments");
@@ -1363,7 +1548,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               </button>
             )}
 
-            {role !== "Individual" && (
+            {role !== "Employee" && (
             <button
               onClick={() => {
                 setCurrentView("workflows");
@@ -1386,14 +1571,14 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
             <div className="bg-indigo-50/60 p-2.5 rounded-lg border border-indigo-200/70">
               <p className="font-bold text-indigo-900">Dectrocel Healthcare and Research</p>
               <p className="text-[11px] text-indigo-600 mt-0.5">
-                Authenticated role: <strong>{currentUser?.role === "Admin" ? "Admin" : currentUser?.role}</strong>
+                Authenticated role: <strong>{(currentUser?.role === "Admin" || currentUser?.role === "Superadmin") ? "Admin" : currentUser?.role}</strong>
               </p>
             </div>
           </div>
         </aside>
 
         {/* Content Viewport */}
-        <main className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-6 lg:p-8 lg:ml-64 font-sans">
+        <main className="min-h-0 min-w-0 w-full flex-1 overflow-x-hidden overflow-y-auto overscroll-contain p-4 sm:p-6 lg:ml-64 lg:w-[calc(100%-16rem)] lg:p-8 font-sans">
           {isLoading ? (
             <div className="flex flex-col items-center justify-center py-20 text-slate-600">
               <RefreshCw className="w-8 h-8 animate-spin text-emerald-600 mb-3" />
@@ -1409,32 +1594,23 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs px-2.5 py-0.5 rounded-full font-bold">
-                          {currentUser?.role === "Admin" ? "Admin Console" : `${currentUser?.name} (${currentUser?.role})`}
+                          {(currentUser?.role === "Admin" || currentUser?.role === "Superadmin") ? "Admin Console" : `${currentUser?.name} (${currentUser?.role})`}
                         </span>
-                        <span className="text-emerald-200/70 text-xs">• Connected to PostgreSQL Database</span>
+                        <span className="text-emerald-200/70 text-xs"> Connected to PostgreSQL Database</span>
                       </div>
                       <h1 className="text-xl sm:text-2xl font-black font-display tracking-tight">
                         DecTrack
                       </h1>
                       <p className="text-emerald-100 text-xs sm:text-sm mt-1 max-w-2xl">
-                        Welcome, {role === "Admin" ? "Admin" : currentUser?.name}. {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}.{" "}
-                        {role === "Admin" && "Organization-wide governance. Manage users, projects, teams, and high-level escalations."}
-                        {role === "Manager" && "Team Lead & Manager Console. Oversee projects, create tasks, assign work, monitor progress, and review deliverables."}
-                        {role === "Team Lead" && "Technical Lead execution hub. Supervise team execution, assign work, and conduct technical reviews."}
-                        {role === "Individual" && "Individual Contributor Hub. Track your assignments, blockers, deliverable submissions, and reports."}
+                        Welcome, {isAdminRole ? "Admin" : currentUser?.name}. {new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" })}.{" "}
+                        {isAdminRole && "Organization-wide governance. Manage users, projects, teams, and high-level escalations."}
+                        {role === "Lead" && "Team Lead & Manager Console. Oversee projects, create tasks, assign work, monitor progress, and review deliverables."}
+                        {role === "Lead" && "Technical Lead execution hub. Supervise team execution, assign work, and conduct technical reviews."}
+                        {role === "Employee" && "Individual Contributor Hub. Track your assignments, blockers, deliverable submissions, and reports."}
                       </p>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">
-                      {canAssignTasks && (
-                        <button
-                          onClick={handleOpenCreateTask}
-                          className="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold px-3.5 py-2.5 rounded-xl shadow-sm transition flex items-center gap-1.5"
-                        >
-                          <Plus className="w-4 h-4" />
-                          New Assignment
-                        </button>
-                      )}
                       {canManageProjects && (
                         <button
                           onClick={() => {
@@ -1532,10 +1708,10 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                         <div className="flex items-center justify-between mb-4">
                           <h2 className="font-bold text-base text-slate-900 flex items-center gap-2">
                             <Sparkles className="w-4 h-4 text-emerald-600" />
-                            {role === "Individual" ? "My Tasks & Deliverables" : "High Priority Task Queue"}
+                            {role === "Employee" ? "My Tasks & Deliverables" : "High Priority Task Queue"}
                           </h2>
                           <button
-                            onClick={() => setCurrentView(role === "Individual" ? "my-tasks" : "all-tasks")}
+                            onClick={() => setCurrentView(role === "Employee" ? "my-tasks" : "all-tasks")}
                             className="text-xs text-emerald-600 hover:underline font-semibold flex items-center gap-1"
                           >
                             View all <ArrowRight className="w-3.5 h-3.5" />
@@ -1545,7 +1721,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                         <div className="divide-y divide-slate-100">
                           {tasksList
                             .filter((t) => {
-                              if (role === "Individual" && currentUser) {
+                              if (role === "Employee" && currentUser) {
                                 return t.assignedToUserId === currentUser.id;
                               }
                               return t.priority === "Urgent" || t.priority === "High" || t.status === "Blocked";
@@ -1569,7 +1745,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                                   </div>
                                   <p className="font-semibold text-sm text-slate-900 truncate">{task.title}</p>
                                   <p className="text-xs text-slate-500 mt-0.5">
-                                    Project: <strong className="text-slate-700">{task.projectName}</strong> • Assigned to: <strong className="text-emerald-700 font-bold">{task.assignedToName}</strong>
+                                    Project: <strong className="text-slate-700">{task.projectName}</strong>  Assigned to: <strong className="text-emerald-700 font-bold">{task.assignedToName}</strong>
                                   </p>
                                 </div>
 
@@ -1682,7 +1858,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                                   </p>
                                   {act.newValue && (
                                     <p className="text-slate-500 text-[11px] mt-0.5 font-mono">
-                                      {act.fieldChanged}: {act.oldValue ? `${act.oldValue} → ` : ""}
+                                      {act.fieldChanged}: {act.oldValue ? `${act.oldValue} ? ` : ""}
                                       {act.newValue}
                                     </p>
                                   )}
@@ -1703,7 +1879,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               )}
 
               {/* ----------------- VIEW 2: ALL TASKS & MY TASKS MATRIX ----------------- */}
-              {((currentView === "my-tasks") || (currentView === "all-tasks" && role !== "Individual")) && (
+              {((currentView === "my-tasks") || (currentView === "all-tasks" && role !== "Employee")) && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div>
@@ -1717,15 +1893,6 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                       </p>
                     </div>
 
-                    {canAssignTasks && (
-                      <button
-                        onClick={handleOpenCreateTask}
-                        className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm px-4 py-2.5 rounded-xl flex items-center gap-2 shadow-sm transition self-start md:self-auto"
-                      >
-                        <Plus className="w-4 h-4" />
-                        Create Assignment
-                      </button>
-                    )}
                   </div>
 
                   {/* Filters Bar */}
@@ -1855,7 +2022,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                                     <span className="font-bold text-slate-900">{t.assignedToName}</span>
                                   </div>
                                 </td>
-                                <td className="py-3.5 px-4 text-slate-600">{t.reviewerName || "—"}</td>
+                                <td className="py-3.5 px-4 text-slate-600">{t.reviewerName || ""}</td>
                                 <td className="py-3.5 px-4">
                                   <span className={`badge ${priorityBadgeStyles[t.priority].bg}`}>
                                     {t.priority}
@@ -1976,7 +2143,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                               Lead: <strong className="text-slate-800">{project.leadName || "Unassigned"}</strong>
                             </p>
                             <p>
-                              Timeline: {project.startDate || "N/A"} → {project.targetDate || "N/A"}
+                              Timeline: {project.startDate || "N/A"} ? {project.targetDate || "N/A"}
                             </p>
                           </div>
                         </div>
@@ -2008,6 +2175,46 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                 </div>
               )}
 
+              {currentView === "departments" && isAdminRole && (
+                <section className="mx-auto max-w-7xl space-y-5" aria-label="Department management">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                      <h1 className="text-2xl font-black font-display text-slate-900">Departments</h1>
+                      <p className="mt-1 text-sm text-slate-500">Manage departments, department heads, teams, and assigned employees.</p>
+                    </div>
+                    <button type="button" onClick={() => { setEditingDepartmentId(null); setDepartmentFormData({ name: "", description: "", headUserId: 0 }); setDepartmentModalOpen(true); }} className="inline-flex items-center gap-2 self-start rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-700"><Plus className="h-4 w-4" />Add Department</button>
+                  </div>
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
+                    <Search className="h-4 w-4 text-slate-500" />
+                    <input aria-label="Search departments" value={departmentSearch} onChange={(event) => setDepartmentSearch(event.target.value)} placeholder="Search departments, descriptions, or department heads" className="w-full bg-transparent text-sm outline-none" />
+                    <div className="flex shrink-0 gap-1 rounded-lg bg-slate-100 p-1" aria-label="Department view">
+                      {(["Active", "History"] as const).map((view) => <button key={view} type="button" onClick={() => { setDepartmentStatusFilter(view === "History" ? "Inactive" : "Active"); setSelectedDepartment(null); }} className={`rounded-md px-3 py-1.5 text-xs font-semibold ${departmentStatusFilter === (view === "History" ? "Inactive" : "Active") ? "bg-white text-indigo-700 shadow-sm" : "text-slate-600"}`}>{view}</button>)}
+                    </div>
+                  </div>
+                  {filteredDepartments.length === 0 ? <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">No departments found. Add a department to get started.</div> : (
+                    <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+                      <div className="space-y-3">
+                        {filteredDepartments.map((department) => {
+                          const active = department.name === selectedDepartment;
+                          return <button key={department.id} type="button" onClick={() => setSelectedDepartment(department.name)} className={`w-full rounded-xl border p-4 text-left transition ${active ? "border-indigo-400 bg-indigo-50 ring-2 ring-indigo-100" : "border-slate-200 bg-white hover:border-indigo-300"}`}>
+                            <div className="flex items-start justify-between gap-3"><div><p className="font-bold text-slate-900">{department.name}</p><p className="mt-1 text-xs text-slate-500">{department.description || "No description"}</p></div><span className={`rounded-full px-2 py-1 text-[11px] font-bold ${department.isActive ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>{department.isActive ? "Active" : "Inactive"}</span></div>
+                            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600"><span>{department.activeMemberCount} active members</span><span>{department.inactiveMemberCount} inactive</span><span>{department.teamCount} teams</span><span>Head: {department.headName || "Not assigned"}</span></div>
+                          </button>;
+                        })}
+                      </div>
+                      {activeDepartment ? <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+                        <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3"><div><h2 className="font-bold text-slate-900">{activeDepartment.name} members</h2><p className="text-xs text-slate-500">Employees associated with this department.</p></div><div className="flex gap-2"><button type="button" onClick={() => { const item = departmentsList.find((entry) => entry.name === activeDepartment.name)!; setEditingDepartmentId(item.id); setDepartmentFormData({ name: item.name, description: item.description || "", headUserId: item.headUserId || 0 }); setDepartmentModalOpen(true); }} className="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-white">Edit</button>{departmentsList.find((entry) => entry.name === activeDepartment.name)?.isActive && <button type="button" onClick={() => { const item = departmentsList.find((entry) => entry.name === activeDepartment.name)!; void handleToggleDepartment(item); }} className="rounded-lg border border-rose-200 px-3 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-50">Remove department</button>}</div></div>
+                        <div className="divide-y divide-slate-100">
+                          {activeDepartment.members.length === 0 ? <p className="p-5 text-sm text-slate-500">No employees are assigned to this department yet.</p> : activeDepartment.members.map((member) => <div key={member.id} className="flex items-center justify-between gap-3 px-4 py-3"><div><p className="text-sm font-semibold text-slate-900">{member.name}</p><p className="text-xs text-slate-500">{member.designation} · {member.email}</p></div><div className="flex items-center gap-2"><span className="rounded-full bg-slate-100 px-2 py-1 text-xs text-slate-700">{member.teamName || "No team"}</span><span className={`rounded-full px-2 py-1 text-xs ${member.isActive ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{member.isActive ? "Active" : "Inactive"}</span></div></div>)}
+                          <div className="border-t border-slate-100 px-4 py-3"><p className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Teams</p>{teamsList.filter((team) => team.departmentId === departmentsList.find((item) => item.name === activeDepartment.name)?.id).length === 0 ? <p className="text-sm text-slate-500">No teams assigned to this department.</p> : teamsList.filter((team) => team.departmentId === departmentsList.find((item) => item.name === activeDepartment.name)?.id).map((team) => <div key={team.id} className="flex flex-wrap items-center justify-between gap-2 py-1.5 text-sm"><span className="font-semibold text-slate-800">{team.name} <span className="ml-1 text-xs font-normal text-slate-500">{team.leadName || "No lead"} · {team.memberCount || 0} members</span></span><div className="flex items-center gap-2"><span className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${team.isActive ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{team.isActive ? "Active" : "Inactive"}</span><button type="button" onClick={() => void handleToggleTeam(team)} className="text-xs font-semibold text-indigo-700 hover:underline">{team.isActive ? "Deactivate" : "Activate"}</button></div></div>)}</div>
+                        </div>
+                        <div className="border-t border-slate-100 p-4"><button type="button" onClick={() => { setTeamFormData({ name: "", description: "", departmentId: departmentsList.find((item) => item.name === activeDepartment.name)?.id || 0, leadId: 0 }); setTeamModalOpen(true); }} className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-3.5 py-2 text-sm font-bold text-white hover:bg-emerald-700"><Plus className="h-4 w-4" />Add Team</button></div>
+                      </div> : <div className="flex min-h-48 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white p-6 text-sm text-slate-500">Select a department to view its members.</div>}
+                    </div>
+                  )}
+                </section>
+              )}
+
               {/* ----------------- VIEW 5: DEDICATED TEAM MANAGEMENT MODULE ----------------- */}
               {currentView === "team-management" && canManageEmployees && (
                 <div className="space-y-6 max-w-7xl mx-auto">
@@ -2032,7 +2239,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                     )}
                   </div>
 
-                  {role === "Admin" && (
+                  {isAdminRole && (
                     <section className="space-y-4" aria-label="Departments">
                       <div>
                         <h2 className="text-lg font-extrabold text-slate-900">Departments</h2>
@@ -2114,12 +2321,20 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                       onChange={(e) => setFilterRole(e.target.value)}
                       className="text-xs sm:text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 outline-none font-semibold text-slate-700"
                     >
-                      <option value="All">All Tiers (Admin, Managers, Employees)</option>
-                      <option value="Admin">Admin (Organization-wide)</option>
-                      <option value="Manager">Team Leads & Managers (Shivam, Animesh)</option>
-                      <option value="Individual">Employees / Individuals (Sakshi, Vaibhav, Suraj)</option>
+                      <option value="All">All Roles</option>
+                      <option value="Superadmin">Superadmin</option>
+                      <option value="Admin">Admin</option>
+                      <option value="Lead">Lead</option>
+                      <option value="Employee">Employee</option>
                     </select>
                   </div>
+
+                  {(filterRole === "All" || filterRole === "Superadmin") && (
+                    <section className="rounded-2xl border border-violet-200 bg-violet-50/50 p-5 space-y-3" aria-label="Superadmins">
+                      <div className="flex items-center justify-between"><div><h2 className="font-extrabold text-violet-950">Superadmin</h2><p className="text-xs text-violet-800">Full system control and Superadmin account management</p></div><span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-bold text-violet-900">{superadminUsers.length} accounts</span></div>
+                      {superadminUsers.map((user) => <div key={user.id} className="rounded-xl border border-violet-200 bg-white p-3"><p className="font-bold text-slate-900">{user.name}</p><p className="text-xs text-slate-500">{user.email} · {user.isActive ? "Active" : "Inactive"}</p></div>)}
+                    </section>
+                  )}
 
                   {/* 1. ADMIN TIER */}
                   {(filterRole === "All" || filterRole === "Admin") && (
@@ -2148,7 +2363,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                               </div>
                               <div>
                                 <p className="font-bold text-sm text-slate-900">{admin.name}</p>
-                                <p className="text-xs text-slate-500">{admin.designation} • {admin.email}</p>
+                                <p className="text-xs text-slate-500">{admin.designation}  {admin.email}</p>
                               </div>
                             </div>
                             <div className="flex items-center gap-2">
@@ -2172,7 +2387,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                   )}
 
                   {/* 2. TEAM LEADS / MANAGERS TIER */}
-                  {(filterRole === "All" || filterRole === "Manager") && (
+                  {(filterRole === "All" || filterRole === "Lead") && (
                     <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
                       <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                         <div className="flex items-center gap-2.5">
@@ -2226,7 +2441,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                               </div>
 
                               <div className="flex justify-end gap-2 pt-1">
-                                {role === "Admin" && lead.isActive && (
+                                {isAdminRole && lead.isActive && (
                                   <button
                                     onClick={() => {
                                       setDeactivationTarget(lead);
@@ -2247,7 +2462,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                   )}
 
                   {/* 3. EMPLOYEES / INDIVIDUAL CONTRIBUTORS TIER */}
-                  {(filterRole === "All" || filterRole === "Individual") && (
+                  {(filterRole === "All" || filterRole === "Employee") && (
                     <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-xs space-y-4">
                       <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                         <div className="flex items-center gap-2.5">
@@ -2303,7 +2518,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                           const active = icTasks.filter((t) => t.status !== "Completed").length;
                           const replacementUsers = usersList.filter((user) =>
                             user.isActive && user.id !== ic.id &&
-                            (role === "Admin" || user.teamId === ic.teamId),
+                            (isAdminRole || user.teamId === ic.teamId),
                           );
                           return (
                             <div key={ic.id} className="p-4 rounded-xl border border-slate-200 bg-slate-50/40 hover:bg-slate-50 transition space-y-3">
@@ -2349,7 +2564,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                                     Remove Employee
                                   </button>
                                 )}
-                                {role === "Admin" && !ic.isActive && (
+                                {isAdminRole && !ic.isActive && (
                                   <button type="button" onClick={() => void handleHideInactiveProfile(ic)} className="w-full text-xs text-rose-700 border border-rose-200 hover:bg-rose-50 font-bold py-1.5 rounded-lg transition">
                                     <X className="w-3.5 h-3.5 inline mr-1" /> Remove Inactive Profile
                                   </button>
@@ -2375,7 +2590,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               )}
 
               {/* ----------------- VIEW 6: TEAM WORKLOAD & CAPACITY ----------------- */}
-              {currentView === "workload" && role !== "Individual" && (
+              {currentView === "workload" && role !== "Employee" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div className="flex items-center justify-between">
                     <div>
@@ -2469,6 +2684,23 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                       );
                     })}
                   </div>
+                  <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5" aria-label="Task progress tracking">
+                    <div><h2 className="text-lg font-extrabold text-slate-900">Task Progress</h2><p className="text-xs text-slate-500">Live assignment and delivery details from authorized tasks.</p></div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
+                      {[{ label: "Employees", value: usersList.filter((user) => user.role === "Employee" && user.isActive).length }, { label: "Active Projects", value: projectsList.filter((project) => project.status === "Active").length }, { label: "Assigned Tasks", value: tasksList.length }, { label: "In Progress", value: tasksList.filter((task) => task.status === "In Progress").length }, { label: "Completed", value: tasksList.filter((task) => task.status === "Completed").length }, { label: "Overdue", value: tasksList.filter((task) => task.dueDate && task.dueDate < localDateString() && task.status !== "Completed").length }, { label: "Blocked", value: tasksList.filter((task) => task.status === "Blocked").length }, { label: "Awaiting Review", value: tasksList.filter((task) => task.status === "In Review").length }].map((metric) => <div key={metric.label} className="rounded-lg border border-slate-100 bg-slate-50 p-2.5"><p className="text-[10px] font-bold uppercase text-slate-500">{metric.label}</p><p className="mt-1 text-xl font-black text-slate-900">{metric.value}</p></div>)}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+                      <select value={progressDepartment} onChange={(event) => setProgressDepartment(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"><option value="All">All departments</option>{Array.from(new Set(usersList.map((user) => user.department).filter(Boolean))).sort().map((name) => <option key={name} value={name}>{name}</option>)}</select>
+                      <select value={progressTeam} onChange={(event) => setProgressTeam(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"><option value="All">All teams</option>{teamsList.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select>
+                      <select value={progressEmployee} onChange={(event) => setProgressEmployee(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"><option value="All">All employees</option>{usersList.filter((user) => user.role === "Employee").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select>
+                      <select value={progressLead} onChange={(event) => setProgressLead(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"><option value="All">All Team Leads</option>{usersList.filter((user) => user.role === "Lead").map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select>
+                      <select value={progressProject} onChange={(event) => setProgressProject(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"><option value="All">All projects</option>{projectsList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select>
+                      <select value={progressStatus} onChange={(event) => setProgressStatus(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"><option value="All">All statuses</option>{taskStatusOptions.map((status) => <option key={status} value={status}>{status}</option>)}</select>
+                      <select value={progressPriority} onChange={(event) => setProgressPriority(event.target.value)} className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs"><option value="All">All priorities</option>{taskPriorityOptions.map((priority) => <option key={priority} value={priority}>{priority}</option>)}</select>
+                      <input aria-label="Assignment date from" type="date" value={progressFrom} onChange={(event) => setProgressFrom(event.target.value)} className="rounded-lg border border-slate-200 px-2 py-2 text-xs" /><input aria-label="Assignment date to" type="date" value={progressTo} onChange={(event) => setProgressTo(event.target.value)} className="rounded-lg border border-slate-200 px-2 py-2 text-xs" />
+                    </div>
+                    <div className="overflow-x-auto rounded-xl border border-slate-200"><table className="min-w-[1700px] w-full text-left text-xs"><thead className="bg-slate-50 text-[10px] font-bold uppercase text-slate-500"><tr><th className="p-3">S.No.</th><th className="p-3">Employee Name</th><th className="p-3">Department</th><th className="p-3">Team</th><th className="p-3">Team Lead</th><th className="p-3">Project Name</th><th className="p-3">Task Name</th><th className="p-3">Assigned By</th><th className="p-3">Assignment Date</th><th className="p-3">Due Date</th><th className="p-3">Progress</th><th className="p-3">Status</th><th className="p-3">Last Updated</th><th className="p-3">Remarks</th><th className="p-3">Actions</th></tr></thead><tbody className="divide-y divide-slate-100">{progressTasks.map((task, index) => { const employee = usersList.find((user) => user.id === task.assignedToUserId); const team = teamsList.find((candidate) => candidate.id === employee?.teamId); return <tr key={task.id}><td className="p-3">{index + 1}</td><td className="p-3 font-semibold">{task.assignedToName || employee?.name || ""}</td><td className="p-3">{employee?.department || ""}</td><td className="p-3">{team?.name || employee?.teamName || ""}</td><td className="p-3">{team?.leadName || ""}</td><td className="p-3">{task.projectName || ""}</td><td className="p-3 font-semibold">{task.title}</td><td className="p-3">{task.assignedByName || ""}</td><td className="p-3">{new Date(task.createdAt).toLocaleDateString()}</td><td className="p-3">{task.dueDate || ""}</td><td className="p-3">{task.progressPercent}%</td><td className="p-3">{task.status}</td><td className="p-3">{new Date(task.updatedAt).toLocaleDateString()}</td><td className="max-w-xs truncate p-3">{task.blockerReason || task.description || ""}</td><td className="p-3"><button type="button" onClick={() => setSelectedTaskId(task.id)} className="rounded-lg border border-indigo-200 px-3 py-1.5 font-semibold text-indigo-700 hover:bg-indigo-50">View</button></td></tr>; })}{progressTasks.length === 0 && <tr><td colSpan={15} className="p-8 text-center text-slate-500">No tasks match the selected filters.</td></tr>}</tbody></table></div>
+                  </section>
                 </div>
               )}
 
@@ -2580,10 +2812,11 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                 <div className="mx-auto max-w-7xl min-w-0 space-y-5">
                   <div className="flex min-w-0 flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
                     <div className="min-w-0">
-                      <h1 className="text-2xl font-black font-display tracking-tight text-slate-900">Calendar & Deadlines</h1>
-                      <p className="mt-1 text-sm text-slate-500">Browse authorized task deadlines by month, week, or day.</p>
+                      <h1 className="text-2xl font-black font-display tracking-tight text-slate-900">Calendar</h1>
+                      <p className="mt-1 text-sm text-slate-500">Client meetings, task deadlines, and project events.</p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
+                      <button type="button" onClick={() => { setEditingMeetingId(null); setMeetingFeedback(""); setMeetingForm((current) => ({ ...current, date: localDateString(calendarDate), startTime: "10:00", endTime: "10:30", timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" })); setMeetingFormOpen(true); }} className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-3 py-2 text-xs font-bold text-white hover:bg-indigo-700"><Plus className="h-4 w-4" />Schedule Meeting</button>
                       <div className="flex items-center rounded-lg border border-slate-200 bg-white p-1">
                         <button type="button" aria-label="Previous period" onClick={() => moveCalendar(-1)} className="rounded-md p-2 text-slate-600 hover:bg-slate-100"><ChevronLeft className="h-4 w-4" /></button>
                         <button type="button" onClick={() => setCalendarDate(new Date())} className="px-2 py-1 text-xs font-bold text-indigo-700 hover:bg-indigo-50 rounded-md">Today</button>
@@ -2622,10 +2855,10 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                   </div>
 
                   <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px] font-semibold text-slate-600" aria-label="Calendar status legend">
-                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-indigo-500" />Upcoming</span>
-                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-red-500" />Overdue</span>
-                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-emerald-500" />Completed</span>
-                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-rose-500" />Blocked</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-indigo-500" />Task deadline</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-violet-500" />Client meeting</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-amber-500" />Project event</span>
+                    <span className="inline-flex items-center gap-1.5"><i className="h-2.5 w-2.5 rounded-full bg-red-500" />Overdue task</span>
                   </div>
 
                   {calendarMode === "Month" && (
@@ -2648,6 +2881,8 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                                   </button>
                                 ))}
                                 {dayTasks.length > 3 && <p className="px-1 text-[10px] font-semibold text-slate-500">+{dayTasks.length - 3} more</p>}
+                                {(calendarMeetingsByDate.get(key) || []).map((meeting) => <button key={`meeting-${meeting.id}`} type="button" onClick={() => { setSelectedMeeting(meeting); setMeetingNotesForm({ minutes: meeting.minutes, decisions: meeting.decisions, clientFeedback: meeting.clientFeedback, actionItems: meeting.actionItems, resultingTaskId: meeting.resultingTaskId || 0, followUpAssigneeId: meeting.followUpAssigneeId || 0, followUpDeadline: meeting.followUpDeadline || "" }); setMeetingFeedback(""); }} className="block w-full truncate rounded border border-violet-200 bg-violet-50 px-1.5 py-1 text-left text-[10px] font-bold text-violet-900" title={`${meeting.title} · ${meeting.clientName}`}>Meeting · {meeting.title}</button>)}
+                                {(calendarProjectsByDate.get(key) || []).map((project) => <button key={`project-${project.id}`} type="button" onClick={() => setSelectedCalendarProject(project)} className="block w-full truncate rounded border border-amber-200 bg-amber-50 px-1.5 py-1 text-left text-[10px] font-bold text-amber-900" title={`Project event · ${project.name}`}>Project · {project.name}</button>)}
                               </div>
                             </div>
                           );
@@ -2671,6 +2906,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                                 <span className="mt-1 flex flex-wrap gap-1 text-[10px]"><span>{task.status}</span><span>· {task.priority}</span><span>· Due {task.dueDate}</span></span>
                               </button>
                             ))}</div>
+                            <div className="mt-2 space-y-2">{(calendarMeetingsByDate.get(key) || []).map((meeting) => <button key={`week-meeting-${meeting.id}`} type="button" onClick={() => { setSelectedMeeting(meeting); setMeetingNotesForm({ minutes: meeting.minutes, decisions: meeting.decisions, clientFeedback: meeting.clientFeedback, actionItems: meeting.actionItems, resultingTaskId: meeting.resultingTaskId || 0, followUpAssigneeId: meeting.followUpAssigneeId || 0, followUpDeadline: meeting.followUpDeadline || "" }); }} className="block w-full rounded-lg border border-violet-200 bg-violet-50 p-2 text-left text-xs text-violet-950"><b>Client meeting</b><span className="block">{meeting.title} · {meeting.clientName}</span></button>)}{(calendarProjectsByDate.get(key) || []).map((project) => <button key={`week-project-${project.id}`} type="button" onClick={() => setSelectedCalendarProject(project)} className="block w-full rounded-lg border border-amber-200 bg-amber-50 p-2 text-left text-xs text-amber-950"><b>Project event</b><span className="block">{project.name}</span></button>)}</div>
                           </section>;
                         })}
                       </div>
@@ -2685,16 +2921,18 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                         <p className="mt-1 text-xs">{task.status} · {task.priority}</p>
                       </button>
                     ))}
+                    {calendarVisibleMeetings.map((meeting) => <button key={`mobile-meeting-${meeting.id}`} type="button" onClick={() => { setSelectedMeeting(meeting); setMeetingNotesForm({ minutes: meeting.minutes, decisions: meeting.decisions, clientFeedback: meeting.clientFeedback, actionItems: meeting.actionItems, resultingTaskId: meeting.resultingTaskId || 0, followUpAssigneeId: meeting.followUpAssigneeId || 0, followUpDeadline: meeting.followUpDeadline || "" }); }} className="block w-full rounded-xl border border-violet-200 bg-violet-50 p-3 text-left text-sm text-violet-950"><b>Client meeting · {meeting.title}</b><p>{meeting.clientName} · {new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "short", timeZone: meeting.timeZone }).format(new Date(meeting.startsAt))}</p></button>)}
+                    {calendarVisibleProjects.map((project) => <button key={`mobile-project-${project.id}`} type="button" onClick={() => setSelectedCalendarProject(project)} className="block w-full rounded-xl border border-amber-200 bg-amber-50 p-3 text-left text-sm text-amber-950"><b>Project event · {project.name}</b><p>{project.targetDate} · {project.status}</p></button>)}
                   </div>
 
-                  {calendarVisibleTasks.length === 0 && (
+                  {calendarVisibleTasks.length === 0 && calendarVisibleMeetings.length === 0 && calendarVisibleProjects.length === 0 && (
                     <div className="rounded-xl border border-dashed border-slate-300 bg-white p-6 text-center text-sm text-slate-500">No tasks match the filters for this {calendarMode.toLowerCase()}.</div>
                   )}
                 </div>
               )}
 
               {/* ----------------- VIEW 9: ANALYTICS ----------------- */}
-              {currentView === "analytics" && role !== "Individual" && (
+              {currentView === "analytics" && role !== "Employee" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div>
                     <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
@@ -2799,7 +3037,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                 </div>
               )}
 
-              {currentView === "activity" && role !== "Individual" && (
+              {currentView === "activity" && role !== "Employee" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div>
                     <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">Activity Logs</h1>
@@ -2812,7 +3050,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                       <table className="min-w-[760px] w-full text-left border-collapse text-xs sm:text-sm">
                         <thead>
                           <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[11px]">
-                            <th className="p-3">Time</th><th className="p-3">Actor</th><th className="p-3">Type</th><th className="p-3">Event</th><th className="p-3">Record</th><th className="p-3">Details</th>{(role === "Admin" || role === "Team Lead") && <th className="p-3">Actions</th>}
+                            <th className="p-3">Time</th><th className="p-3">Actor</th><th className="p-3">Type</th><th className="p-3">Event</th><th className="p-3">Record</th><th className="p-3">Details</th>{(isAdminRole || role === "Lead") && <th className="p-3">Actions</th>}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
@@ -2824,7 +3062,7 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                               <td className="p-3 font-semibold text-slate-800">{event.action.split("_").join(" ")}</td>
                               <td className="p-3">{event.entityName}</td>
                               <td className="p-3 text-slate-600">{event.details}</td>
-                              {(role === "Admin" || role === "Team Lead") && (
+                              {(isAdminRole || role === "Lead") && (
                                 <td className="p-3">
                                   <button
                                     type="button"
@@ -2848,79 +3086,55 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
               )}
 
               {/* ----------------- VIEW 10: PROJECT ALLOTMENTS ----------------- */}
-              {role === "Admin" && currentView === "allotments" && (
+              {isAdminRole && currentView === "allotments" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div className="flex items-center justify-between">
                     <div>
                       <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
                         Project Allotments
                       </h1>
-                      <p className="text-xs sm:text-sm text-slate-500 mt-0.5">
-                        Technical project assignments with assistance contacts and repository linkages
-                      </p>
+                      <p className="text-xs sm:text-sm text-slate-500 mt-0.5">Project and task assignments with individual task timelines and progress.</p>
                     </div>
                   </div>
 
+                  <div className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-3">
+                    <Search className="h-4 w-4 text-slate-500" />
+                    <input value={allotmentSearch} onChange={(event) => { setAllotmentSearch(event.target.value); setAllotmentPage(0); }} placeholder="Search by assigner, project, lead, member, task, or status" className="w-full bg-transparent text-sm outline-none" />
+                  </div>
                   <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-x-auto">
-                    <table className="min-w-[900px] w-full text-left border-collapse text-xs sm:text-sm">
+                    <table className="min-w-[1500px] w-full text-left border-collapse text-xs sm:text-sm">
                       <thead>
                         <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[11px]">
-                          <th className="py-3 px-4">S.No</th>
-                          <th className="py-3 px-4">Employee</th>
-                          <th className="py-3 px-4">Project</th>
-                          <th className="py-3 px-4">Task Assigned</th>
-                          <th className="py-3 px-4">Assistance Contacts</th>
-                          <th className="py-3 px-4">Progress</th>
-                          <th className="py-3 px-4">Repository</th>
+                          <th className="py-3 px-4">S.No.</th><th className="py-3 px-4">Assigned By</th><th className="py-3 px-4">Project Name</th><th className="py-3 px-4">Project Lead</th><th className="py-3 px-4">Team Members</th><th className="py-3 px-4">Task</th><th className="py-3 px-4">Assignment Date</th><th className="py-3 px-4">Completion Date</th><th className="py-3 px-4">Due Date</th><th className="py-3 px-4">Progress</th><th className="py-3 px-4">Related Links</th><th className="py-3 px-4">Remarks</th><th className="py-3 px-4">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {allotments.map((allotment) => (
+                        {visibleAllotments.map((allotment) => (
                           <tr key={allotment.id} className="hover:bg-slate-50 transition">
-                            <td className="py-3.5 px-4 font-mono font-bold text-slate-500">
-                              #{allotment.serialNumber}
-                            </td>
-                            <td className="py-3.5 px-4 font-bold text-slate-900">{allotment.employeeName}</td>
-                            <td className="py-3.5 px-4 text-slate-700 font-semibold">{allotment.project}</td>
-                            <td className="py-3.5 px-4 max-w-xs">{allotment.taskAssigned}</td>
-                            <td className="py-3.5 px-4">
-                              <div className="flex flex-wrap gap-1">
-                                {allotment.assistanceBy.map((p, idx) => (
-                                  <span key={idx} className="bg-slate-100 text-slate-700 text-[10px] px-2 py-0.5 rounded font-medium">
-                                    {p}
-                                  </span>
-                                ))}
-                              </div>
-                            </td>
-                            <td className="py-3.5 px-4">
-                              <span className="badge bg-emerald-50 text-emerald-700 font-semibold">
-                                {allotment.progress}
-                              </span>
-                            </td>
-                            <td className="py-3.5 px-4">
-                              {allotment.repositoryUrl ? (
-                                <a
-                                  href={allotment.repositoryUrl}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-emerald-700 hover:underline flex items-center gap-1 font-bold"
-                                >
-                                  <Link className="w-3 h-3" /> Repo Link
-                                </a>
-                              ) : (
-                                <span className="text-slate-600">—</span>
-                              )}
-                            </td>
+                            <td className="py-3.5 px-4 font-mono text-slate-500">{allotment.serialNumber}</td>
+                            <td className="py-3.5 px-4">{allotment.assignedBy || ""}</td>
+                            <td className="py-3.5 px-4 font-semibold">{allotment.projectName || allotment.project}</td>
+                            <td className="py-3.5 px-4">{allotment.projectLead || ""}</td>
+                            <td className="py-3.5 px-4">{(allotment.teamMembers || []).join(", ") || ""}</td>
+                            <td className="py-3.5 px-4 font-semibold text-slate-900">{allotment.taskAssigned}</td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">{allotment.assignmentDate ? new Date(allotment.assignmentDate).toLocaleDateString() : ""}</td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">{allotment.completionDate || ""}</td>
+                            <td className="py-3.5 px-4 whitespace-nowrap">{allotment.dueDate || ""}</td>
+                            <td className="py-3.5 px-4"><span className="font-semibold">{allotment.progressPercent ?? 0}%</span><span className="block text-[10px] text-slate-500">{allotment.taskStatus || allotment.progress}</span></td>
+                            <td className="py-3.5 px-4">{(allotment.relatedLinks || []).map((url, index) => <a key={url} href={url} target="_blank" rel="noopener noreferrer" className="mb-1 flex items-center gap-1 text-indigo-700 hover:underline"><Link className="h-3 w-3" />Link {index + 1}</a>)}</td>
+                            <td className="max-w-xs py-3.5 px-4 text-slate-600">{allotment.remarks || ""}</td>
+                            <td className="py-3.5 px-4"><button type="button" onClick={() => setSelectedTaskId(allotment.taskId || allotment.id)} className="rounded-lg border border-indigo-200 px-3 py-1.5 font-semibold text-indigo-700 hover:bg-indigo-50">View Task</button></td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
                   </div>
+                  <div className="flex items-center justify-between text-xs text-slate-600"><span>{filteredAllotments.length ? `${allotmentPage * allotmentPageSize + 1}${Math.min((allotmentPage + 1) * allotmentPageSize, filteredAllotments.length)} of ${filteredAllotments.length}` : "No matching assignments"}</span><div className="flex gap-2"><button type="button" disabled={allotmentPage === 0} onClick={() => setAllotmentPage((page) => Math.max(0, page - 1))} className="rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-40">Previous</button><button type="button" disabled={(allotmentPage + 1) * allotmentPageSize >= filteredAllotments.length} onClick={() => setAllotmentPage((page) => page + 1)} className="rounded-lg border border-slate-200 px-3 py-1.5 disabled:opacity-40">Next</button></div></div>
                 </div>
               )}
 
               {/* ----------------- VIEW 11: SYSTEM WORKFLOWS ----------------- */}
-              {currentView === "workflows" && role !== "Individual" && (
+              {currentView === "workflows" && role !== "Employee" && (
                 <div className="space-y-6 max-w-7xl mx-auto">
                   <div>
                     <h1 className="text-2xl font-black font-display text-slate-900 tracking-tight">
@@ -2939,15 +3153,15 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                       </h3>
                       <div className="bg-slate-900 text-emerald-400 p-4 rounded-xl font-mono text-xs overflow-x-auto">
                         <pre>{`[Backlog / Unscheduled]
-         ↓
+         ?
     [To Do (Ready)]
-         ↓
-  [In Progress (Working)] ←── Changes Requested
-         ↓                           │
- [In Review (Submitted)]             │
-         ↓                           │
- [Reviewer Review] ──────────────────┘
-         ↓ (Approved)
+         ?
+  [In Progress (Working)] ?-- Changes Requested
+         ?                           ¦
+ [In Review (Submitted)]             ¦
+         ?                           ¦
+ [Reviewer Review] ------------------+
+         ? (Approved)
    [Completed]`}</pre>
                       </div>
                       <p className="text-xs text-slate-600">
@@ -2962,18 +3176,18 @@ export default function App({ initialUser }: { initialUser: AppUser }) {
                       </h3>
                       <div className="bg-slate-900 text-emerald-300 p-4 rounded-xl font-mono text-xs overflow-x-auto">
                         <pre>{`Admin (Organization-Wide)
-  ├── Governance, Team Config & Permissions
-  └── System-Level Oversight
+  +-- Governance, Team Config & Permissions
+  +-- System-Level Oversight
 
 Team Leads / Managers (Shivam, Animesh)
-  ├── Defines Objectives, Creates & Assigns Tasks
-  ├── Monitors Deadlines, Capacity & Workload
-  └── Reviews Deliverables & Reports Status
+  +-- Defines Objectives, Creates & Assigns Tasks
+  +-- Monitors Deadlines, Capacity & Workload
+  +-- Reviews Deliverables & Reports Status
 
 Employees / Contributors (Sakshi, Vaibhav, Suraj)
-  ├── Acknowledges Tasks & Starts Work
-  ├── Updates Status, Records Blockers
-  └── Submits Deliverables & Daily Reports`}</pre>
+  +-- Acknowledges Tasks & Starts Work
+  +-- Updates Status, Records Blockers
+  +-- Submits Deliverables & Daily Reports`}</pre>
                       </div>
                       <p className="text-xs text-slate-600">
                         Server-side authorization enforces that only authorized personas can assign work, adjust ownership, or bypass review stages.
@@ -2989,6 +3203,47 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
       </div>
 
       {/* ----------------- MODAL: TASK DETAIL & ACTIONS SIDE PANEL ----------------- */}
+      {meetingFormOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/50 p-4">
+          <form onSubmit={handleSaveMeeting} className="mx-auto my-4 w-full max-w-3xl space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-center justify-between"><div><h2 className="text-xl font-black text-slate-900">{editingMeetingId ? "Edit or Reschedule Meeting" : "Schedule Client Meeting"}</h2><p className="text-xs text-slate-500">Participants receive an in-portal notification.</p></div><button type="button" onClick={() => setMeetingFormOpen(false)} className="rounded p-2 text-slate-500 hover:bg-slate-100" aria-label="Close">×</button></div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-bold text-slate-600 sm:col-span-2">Meeting title *<input required maxLength={160} value={meetingForm.title} onChange={(event) => setMeetingForm({ ...meetingForm, title: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600">Client/company *<input required maxLength={160} value={meetingForm.clientName} onChange={(event) => setMeetingForm({ ...meetingForm, clientName: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600">Organizer *<select required value={meetingForm.organizerId} onChange={(event) => setMeetingForm({ ...meetingForm, organizerId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal">{meetingOrganizerUsers.map((user) => <option key={user.id} value={user.id}>{user.name} · {user.role}</option>)}</select></label><label className="text-xs font-bold text-slate-600">Client contact<input value={meetingForm.clientContact} onChange={(event) => setMeetingForm({ ...meetingForm, clientContact: event.target.value })} placeholder="Email or phone" className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600">Meeting date *<input required type="date" value={meetingForm.date} onChange={(event) => setMeetingForm({ ...meetingForm, date: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600">Time zone *<input required value={meetingForm.timeZone} onChange={(event) => setMeetingForm({ ...meetingForm, timeZone: event.target.value })} placeholder="Asia/Kolkata" className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600">Start time *<input required type="time" value={meetingForm.startTime} onChange={(event) => setMeetingForm({ ...meetingForm, startTime: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600">End time *<input required type="time" value={meetingForm.endTime} onChange={(event) => setMeetingForm({ ...meetingForm, endTime: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600">Meeting type *<select value={meetingForm.meetingType} onChange={(event) => setMeetingForm({ ...meetingForm, meetingType: event.target.value as "Online" | "In-person" })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm"><option>Online</option><option>In-person</option></select></label>
+              {meetingForm.meetingType === "Online" ? <label className="text-xs font-bold text-slate-600">Meeting link *<input required type="url" value={meetingForm.meetingLink} onChange={(event) => setMeetingForm({ ...meetingForm, meetingLink: event.target.value })} placeholder="https://" className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label> : <label className="text-xs font-bold text-slate-600">Physical location *<input required value={meetingForm.location} onChange={(event) => setMeetingForm({ ...meetingForm, location: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>}
+              <label className="text-xs font-bold text-slate-600 sm:col-span-2">Internal participants<select multiple value={meetingForm.participantIds.map(String)} onChange={(event) => setMeetingForm({ ...meetingForm, participantIds: Array.from(event.target.selectedOptions, (option) => Number(option.value)) })} className="mt-1 h-24 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal">{meetingParticipantUsers.filter((user) => user.isActive && user.id !== meetingForm.organizerId).map((user) => <option key={user.id} value={user.id}>{user.name} · {user.role} · {user.email}</option>)}</select><span className="mt-1 block font-normal">Organizer can be any active employee, lead, admin, or superadmin. Use Ctrl/Cmd to select multiple participants.</span></label>
+              <label className="text-xs font-bold text-slate-600">Related department<select value={meetingForm.departmentId} onChange={(event) => setMeetingForm({ ...meetingForm, departmentId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal"><option value={0}>None</option>{meetingDepartments.map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
+              <label className="text-xs font-bold text-slate-600">Related project<select value={meetingForm.projectId} onChange={(event) => setMeetingForm({ ...meetingForm, projectId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal"><option value={0}>None</option>{projectsList.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
+              <label className="text-xs font-bold text-slate-600 sm:col-span-2">Related task<select value={meetingForm.taskId} onChange={(event) => setMeetingForm({ ...meetingForm, taskId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-normal"><option value={0}>None</option>{tasksList.map((task) => <option key={task.id} value={task.id}>{task.taskCode} · {task.title}</option>)}</select></label>
+              <label className="text-xs font-bold text-slate-600 sm:col-span-2">Agenda<textarea rows={2} value={meetingForm.agenda} onChange={(event) => setMeetingForm({ ...meetingForm, agenda: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+              <label className="text-xs font-bold text-slate-600 sm:col-span-2">Description<textarea rows={3} value={meetingForm.description} onChange={(event) => setMeetingForm({ ...meetingForm, description: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal" /></label>
+            </div>
+            {meetingFeedback && <p role="alert" className="text-sm text-rose-700">{meetingFeedback}</p>}
+            <div className="flex justify-end gap-2 border-t pt-3"><button type="button" onClick={() => setMeetingFormOpen(false)} className="rounded-lg border px-4 py-2 text-sm">Cancel</button><button type="submit" className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white">{editingMeetingId ? "Save changes" : "Schedule meeting"}</button></div>
+          </form>
+        </div>
+      )}
+
+      {selectedMeeting && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/50 p-4" onClick={() => { setSelectedMeeting(null); setMeetingFeedback(""); }}>
+          <section role="dialog" aria-modal="true" aria-label="Client meeting details" onClick={(event) => event.stopPropagation()} className="mx-auto my-5 w-full max-w-3xl space-y-4 rounded-2xl bg-white p-5 shadow-2xl">
+            <header className="flex items-start justify-between gap-3"><div><span className="rounded-full bg-violet-100 px-2.5 py-1 text-[10px] font-bold text-violet-900">Client meeting · {selectedMeeting.status}</span><h2 className="mt-2 text-xl font-black text-slate-900">{selectedMeeting.title}</h2><p className="text-sm text-slate-600">{selectedMeeting.clientName}</p></div><button type="button" onClick={() => setSelectedMeeting(null)} className="rounded p-2 text-slate-500 hover:bg-slate-100">×</button></header>
+            <div className="grid gap-3 rounded-xl bg-slate-50 p-4 text-sm sm:grid-cols-2"><p><b>When:</b> {new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeStyle: "short", timeZone: selectedMeeting.timeZone }).format(new Date(selectedMeeting.startsAt))} – {new Intl.DateTimeFormat(undefined, { timeStyle: "short", timeZone: selectedMeeting.timeZone }).format(new Date(selectedMeeting.endsAt))} ({selectedMeeting.timeZone})</p><p><b>Organizer:</b> {selectedMeeting.organizerName}</p><p><b>Client contact:</b> {selectedMeeting.clientContact || "Not provided"}</p><p><b>Type:</b> {selectedMeeting.meetingType === "Online" ? <a href={selectedMeeting.meetingLink || undefined} target="_blank" rel="noreferrer" className="text-indigo-700 underline">Open meeting link</a> : selectedMeeting.location}</p><p><b>Department:</b> {selectedMeeting.departmentName || "—"}</p><p><b>Project:</b> {selectedMeeting.projectName || "—"}</p><p><b>Task:</b> {selectedMeeting.taskTitle || "—"}</p><p><b>Participants:</b> {selectedMeeting.participants.map((person) => person.name).join(", ") || "None"}</p><p className="sm:col-span-2"><b>Agenda:</b> {selectedMeeting.agenda || "—"}</p><p className="sm:col-span-2"><b>Description:</b> {selectedMeeting.description || "—"}</p></div>
+            <div className="flex flex-wrap gap-2">{(isAdminRole || selectedMeeting.organizerId === currentUser?.id || role === "Lead") && <button type="button" onClick={() => { const dateParts = new Intl.DateTimeFormat("en-CA", { timeZone: selectedMeeting.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(selectedMeeting.startsAt)); const dateMap = Object.fromEntries(dateParts.map((part) => [part.type, part.value])); const timeParts = new Intl.DateTimeFormat("en-GB", { timeZone: selectedMeeting.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(selectedMeeting.startsAt)); const timeMap = Object.fromEntries(timeParts.map((part) => [part.type, part.value])); const endParts = new Intl.DateTimeFormat("en-GB", { timeZone: selectedMeeting.timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(selectedMeeting.endsAt)); const endMap = Object.fromEntries(endParts.map((part) => [part.type, part.value])); setMeetingForm({ title: selectedMeeting.title, clientName: selectedMeeting.clientName, clientContact: selectedMeeting.clientContact || "", date: `${dateMap.year}-${dateMap.month}-${dateMap.day}`, startTime: `${timeMap.hour}:${timeMap.minute}`, endTime: `${endMap.hour}:${endMap.minute}`, timeZone: selectedMeeting.timeZone, meetingType: selectedMeeting.meetingType, meetingLink: selectedMeeting.meetingLink || "", location: selectedMeeting.location || "", agenda: selectedMeeting.agenda, description: selectedMeeting.description, organizerId: selectedMeeting.organizerId, participantIds: selectedMeeting.participants.map((person) => person.id), projectId: selectedMeeting.projectId || 0, taskId: selectedMeeting.taskId || 0, departmentId: selectedMeeting.departmentId || 0 }); setEditingMeetingId(selectedMeeting.id); setSelectedMeeting(null); setMeetingFormOpen(true); }} className="rounded-lg border border-indigo-200 px-3 py-2 text-xs font-bold text-indigo-800">Edit / Reschedule</button>}{(isAdminRole || selectedMeeting.organizerId === currentUser?.id || role === "Lead") && selectedMeeting.status !== "Cancelled" && <button type="button" onClick={async () => { try { const updated = await updateClientMeeting(selectedMeeting.id, { status: "Cancelled" }); setSelectedMeeting(updated); setClientMeetings(await getClientMeetings()); } catch (error: any) { setMeetingFeedback(error.message); } }} className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-bold text-rose-700">Cancel meeting</button>}</div>
+            {selectedMeeting.status !== "Completed" && selectedMeeting.status !== "Cancelled" && (selectedMeeting.organizerId === currentUser?.id || isAdminRole || selectedMeeting.participants.some((person) => person.id === currentUser?.id)) && <button type="button" onClick={async () => { try { const updated = await updateClientMeeting(selectedMeeting.id, { status: "Completed" }); setSelectedMeeting(updated); setClientMeetings(await getClientMeetings()); } catch (error: any) { setMeetingFeedback(error.message); } }} className="rounded-lg border border-emerald-200 px-3 py-2 text-xs font-bold text-emerald-800">Mark completed</button>}
+            <div className="space-y-3 border-t pt-4"><h3 className="font-extrabold text-slate-900">Meeting notes and follow-ups</h3><label className="block text-xs font-bold text-slate-600">Minutes<textarea rows={3} value={meetingNotesForm.minutes} onChange={(event) => setMeetingNotesForm({ ...meetingNotesForm, minutes: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm font-normal" /></label><div className="grid gap-3 sm:grid-cols-2"><label className="text-xs font-bold text-slate-600">Decisions<textarea rows={2} value={meetingNotesForm.decisions} onChange={(event) => setMeetingNotesForm({ ...meetingNotesForm, decisions: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm font-normal" /></label><label className="text-xs font-bold text-slate-600">Client feedback<textarea rows={2} value={meetingNotesForm.clientFeedback} onChange={(event) => setMeetingNotesForm({ ...meetingNotesForm, clientFeedback: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm font-normal" /></label><label className="text-xs font-bold text-slate-600 sm:col-span-2">Action items<textarea rows={2} value={meetingNotesForm.actionItems} onChange={(event) => setMeetingNotesForm({ ...meetingNotesForm, actionItems: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm font-normal" /></label><label className="text-xs font-bold text-slate-600">Assigned employee<select value={meetingNotesForm.followUpAssigneeId} onChange={(event) => setMeetingNotesForm({ ...meetingNotesForm, followUpAssigneeId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-2 text-sm font-normal"><option value={0}>Unassigned</option>{meetingParticipantUsers.filter((user) => user.isActive).map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label><label className="text-xs font-bold text-slate-600">Follow-up deadline<input type="date" value={meetingNotesForm.followUpDeadline} onChange={(event) => setMeetingNotesForm({ ...meetingNotesForm, followUpDeadline: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 p-2 text-sm font-normal" /></label><label className="text-xs font-bold text-slate-600 sm:col-span-2">Resulting task<select value={meetingNotesForm.resultingTaskId} onChange={(event) => setMeetingNotesForm({ ...meetingNotesForm, resultingTaskId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white p-2 text-sm font-normal"><option value={0}>No linked task</option>{tasksList.map((task) => <option key={task.id} value={task.id}>{task.taskCode} · {task.title}</option>)}</select></label></div>{meetingFeedback && <p role="status" className="text-sm text-indigo-700">{meetingFeedback}</p>}<button type="button" onClick={() => void handleSaveMeetingNotes()} className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white">Save notes</button></div>
+          </section>
+        </div>
+      )}
+
+      {selectedCalendarProject && <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4" onClick={() => setSelectedCalendarProject(null)}><section role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()} className="w-full max-w-lg space-y-3 rounded-2xl bg-white p-5"><span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-bold text-amber-900">Project event</span><h2 className="text-xl font-black">{selectedCalendarProject.name}</h2><p>{selectedCalendarProject.description || "No project description."}</p><p className="text-sm text-slate-600">Target date: {selectedCalendarProject.targetDate || "—"} · {selectedCalendarProject.status}</p><button type="button" onClick={() => setSelectedCalendarProject(null)} className="rounded-lg border px-3 py-2 text-sm">Close</button></section></div>}
+
       {selectedTaskId && selectedTask && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex justify-end">
           <div className="w-full max-w-2xl bg-white h-full shadow-2xl flex flex-col animate-in slide-in-from-right duration-200">
@@ -3238,6 +3493,31 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
         </div>
       )}
 
+      {departmentModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <form onSubmit={handleSaveDepartment} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between"><h2 className="text-lg font-black text-slate-900">{editingDepartmentId ? "Edit Department" : "Add Department"}</h2><button type="button" onClick={() => setDepartmentModalOpen(false)} aria-label="Close" className="rounded-lg p-1 text-slate-500 hover:bg-slate-100"><X className="h-5 w-5" /></button></div>
+            <label className="block text-sm font-bold text-slate-700">Department name *<input required maxLength={120} value={departmentFormData.name} onChange={(event) => setDepartmentFormData({ ...departmentFormData, name: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 font-normal outline-none focus:border-indigo-500" /></label>
+            <label className="block text-sm font-bold text-slate-700">Description<textarea maxLength={2000} value={departmentFormData.description} onChange={(event) => setDepartmentFormData({ ...departmentFormData, description: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 font-normal outline-none focus:border-indigo-500" rows={3} /></label>
+            <label className="block text-sm font-bold text-slate-700">Department head<select value={departmentFormData.headUserId} onChange={(event) => setDepartmentFormData({ ...departmentFormData, headUserId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-normal"><option value={0}>Not assigned</option>{usersList.filter((user) => user.isActive).map((user) => <option key={user.id} value={user.id}>{user.name} · {user.role}</option>)}</select></label>
+            <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setDepartmentModalOpen(false)} className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Cancel</button><button type="submit" className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-700">{editingDepartmentId ? "Save Changes" : "Create Department"}</button></div>
+          </form>
+        </div>
+      )}
+
+      {teamModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <form onSubmit={handleSaveTeam} className="w-full max-w-lg space-y-4 rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between"><h2 className="text-lg font-black text-slate-900">Add Team</h2><button type="button" onClick={() => setTeamModalOpen(false)} aria-label="Close" className="rounded-lg p-1 text-slate-500 hover:bg-slate-100"><X className="h-5 w-5" /></button></div>
+            <label className="block text-sm font-bold text-slate-700">Team name *<input required maxLength={120} value={teamFormData.name} onChange={(event) => setTeamFormData({ ...teamFormData, name: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 font-normal" /></label>
+            <label className="block text-sm font-bold text-slate-700">Department *<select required value={teamFormData.departmentId} onChange={(event) => setTeamFormData({ ...teamFormData, departmentId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-normal"><option value={0} disabled>Select department</option>{departmentsList.filter((department) => department.isActive).map((department) => <option key={department.id} value={department.id}>{department.name}</option>)}</select></label>
+            <label className="block text-sm font-bold text-slate-700">Team Lead<select value={teamFormData.leadId} onChange={(event) => setTeamFormData({ ...teamFormData, leadId: Number(event.target.value) })} className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-normal"><option value={0}>Not assigned</option>{usersList.filter((user) => user.isActive && (user.role === "Lead")).map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}</select></label>
+            <label className="block text-sm font-bold text-slate-700">Description<textarea maxLength={2000} value={teamFormData.description} onChange={(event) => setTeamFormData({ ...teamFormData, description: event.target.value })} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 font-normal" rows={3} /></label>
+            <div className="flex justify-end gap-2 border-t border-slate-100 pt-4"><button type="button" onClick={() => setTeamModalOpen(false)} className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700">Cancel</button><button type="submit" className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700">Create Team</button></div>
+          </form>
+        </div>
+      )}
+
       {/* ----------------- MODAL: CREATE / EDIT TASK ----------------- */}
       {isTaskModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-xs flex items-center justify-center p-4">
@@ -3268,7 +3548,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Project *</label>
                   <select
-                    disabled={role === "Individual"}
+                    disabled={role === "Employee"}
                     value={taskFormData.projectId}
                     onChange={(e) => setTaskFormData({ ...taskFormData, projectId: Number(e.target.value) })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg outline-none bg-white font-medium"
@@ -3284,7 +3564,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Primary Assignee (Employee) *</label>
                   <select
-                    disabled={role === "Individual"}
+                    disabled={role === "Employee"}
                     value={taskFormData.assignedToUserId}
                     onChange={(e) => setTaskFormData({ ...taskFormData, assignedToUserId: Number(e.target.value) })}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg outline-none bg-white font-medium"
@@ -3302,7 +3582,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Reviewer</label>
                   <select
-                    disabled={role === "Individual"}
+                    disabled={role === "Employee"}
                     value={taskFormData.reviewerUserId || ""}
                     onChange={(e) =>
                       setTaskFormData({
@@ -3372,7 +3652,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Estimated Effort (Hours)</label>
                   <input
-                    disabled={role === "Individual"}
+                    disabled={role === "Employee"}
                     type="number"
                     min="1"
                     value={taskFormData.estimatedHours}
@@ -3721,7 +4001,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                     minLength={7}
                     maxLength={8}
                     autoComplete="new-password"
-                    placeholder="7–8 characters"
+                    placeholder="78 characters"
                     value={userFormData.password}
                     onChange={(e) => setUserFormData({ ...userFormData, password: e.target.value })}
                     className="w-full px-3 py-2 pr-10 border border-slate-200 rounded-lg"
@@ -3735,7 +4015,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                     <Eye className="h-4 w-4" />
                   </button>
                 </div>
-                <p className="mt-1 text-[11px] text-slate-500">7–8 characters with at least one letter and one number.</p>
+                <p className="mt-1 text-[11px] text-slate-500">78 characters with at least one letter and one number.</p>
               </div>
               <div className="flex items-center gap-2">
                 <input
@@ -3752,19 +4032,13 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Department *</label>
-                  <select
-                    required
-                    value={userFormData.department}
-                    onChange={(e) => setUserFormData({ ...userFormData, department: e.target.value })}
-                    className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white"
-                  >
-                    <option value="Sales">Sales</option>
-                    <option value="Technical">Technical</option>
-                  </select>
+                  {isAdminRole ? <select required value={userFormData.department} onChange={(e) => setUserFormData({ ...userFormData, department: e.target.value, teamId: 0 })} className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white">
+                    {departmentsList.filter((department) => department.isActive).map((department) => <option key={department.id} value={department.name}>{department.name}</option>)}
+                  </select> : <input readOnly value={teamsList.find((team) => team.id === currentUser?.teamId)?.departmentName || userFormData.department} className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-slate-50" />}
                 </div>
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Team *</label>
-                  {role === "Admin" ? (
+                  {isAdminRole ? (
                     <select
                       required
                       value={userFormData.teamId}
@@ -3772,7 +4046,7 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white"
                     >
                       <option value={0} disabled>Select team</option>
-                      {teamsList.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+                      {teamsList.filter((team) => team.isActive && team.departmentName?.toLocaleLowerCase() === userFormData.department.toLocaleLowerCase()).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
                     </select>
                   ) : (
                     <input
@@ -3801,21 +4075,21 @@ Employees / Contributors (Sakshi, Vaibhav, Suraj)
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block font-bold text-slate-700 mb-1">Role *</label>
-                  {role === "Admin" ? (
+                  {isAdminRole ? (
                     <select
                       value={userFormData.role}
                       onChange={(e) => setUserFormData({ ...userFormData, role: e.target.value as UserRole })}
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white font-bold"
                     >
-                      <option value="Admin">Admin</option>
-                      <option value="Manager">Manager</option>
-                      <option value="Team Lead">Team Lead</option>
-                      <option value="Individual">Individual Member</option>
+                      {role === "Superadmin" && <option value="Superadmin">Superadmin</option>}<option value="Admin">Admin</option>
+                      <option value="Lead">Lead</option>
+
+                      <option value="Employee">Employee</option>
                     </select>
                   ) : (
                     <input
                       type="text"
-                      value="Individual Member"
+                      value="Employee"
                       readOnly
                       className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-slate-50 font-bold"
                     />

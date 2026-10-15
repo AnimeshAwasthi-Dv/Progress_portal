@@ -29,6 +29,11 @@ import {
   createUser,
   listTeams,
   createTeam,
+  setTeamActive,
+  listDepartments,
+  createDepartment,
+  updateDepartment,
+  setDepartmentActive,
   listProjects,
   createProject,
   listTasks,
@@ -48,6 +53,17 @@ import {
   listNotifications,
   markNotificationRead,
   markAllNotificationsRead,
+  runTaskDeadlineReminderSweep,
+  listClientMeetings,
+  listClientMeetingParticipants,
+  listClientMeetingOrganizers,
+  listClientMeetingDepartments,
+  getClientMeeting,
+  createClientMeeting,
+  updateClientMeeting,
+  getClientMeetingPreferences,
+  updateClientMeetingPreferences,
+  runClientMeetingReminderSweep,
   getTeamWorkloadAnalytics,
   getDashboardMetrics,
   listOrganizationActivity,
@@ -66,7 +82,7 @@ const statuses: WorkStatus[] = ["In Progress", "Completed", "Pending", "On Hold"
 const taskProgressOptions: TaskProgress[] = ["Not Started", "In Progress", "Blocked", "Completed"];
 const taskStatusOptions: TaskStatus[] = ["Backlog", "To Do", "In Progress", "In Review", "Completed", "Blocked"];
 const taskPriorityOptions: TaskPriority[] = ["Low", "Medium", "High", "Urgent"];
-const userRoleOptions: UserRole[] = ["Admin", "Manager", "Team Lead", "Individual"];
+const userRoleOptions: UserRole[] = ["Superadmin", "Admin", "Lead", "Employee"];
 
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
@@ -120,6 +136,23 @@ function validPassword(password: string) {
   return password.length >= 7 && password.length <= 8 && /[A-Za-z]/.test(password) && /\d/.test(password);
 }
 
+function isDateOnly(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+}
+
+function isOptionalDateOnly(value: unknown) {
+  return value === undefined || value === null || value === "" || isDateOnly(value);
+}
+
+function isSafeHttpUrl(value: unknown) {
+  if (value === undefined || value === null || value === "") return true;
+  if (typeof value !== "string" || value.length > 2048) return false;
+  try { const url = new URL(value); return url.protocol === "https:" || url.protocol === "http:"; }
+  catch { return false; }
+}
+
 async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   try {
     const token = readSessionCookie(req);
@@ -147,7 +180,7 @@ function requireRole(allowedRoles: UserRole[]) {
       res.status(401).json({ error: "Authentication required." });
       return;
     }
-    if (!allowedRoles.includes(req.currentUser.role)) {
+    if (!allowedRoles.includes(req.currentUser.role) && !(req.currentUser.role === "Superadmin" && allowedRoles.includes("Admin"))) {
       res.status(403).json({
         error: `Forbidden: Access restricted to roles: ${allowedRoles.join(", ")}. Current role: ${req.currentUser.role}`,
       });
@@ -271,7 +304,7 @@ app.get(
 app.post(
   "/api/users",
   authMiddleware,
-  requireRole(["Admin", "Team Lead"]),
+  requireRole(["Admin", "Lead"]),
   asyncRoute(async (req, res) => {
     const { name, username, email, password, role, department, designation, teamId, projectIds, mustChangePassword } = req.body as Record<string, unknown>;
     if (
@@ -284,19 +317,33 @@ app.post(
       res.status(400).json({ error: "Provide a valid name, username, email, password, and role. Passwords require 7-8 characters with a letter and number." });
       return;
     }
-    if (req.currentUser?.role === "Team Lead" && role !== "Individual") {
+    if (req.currentUser?.role === "Lead" && role !== "Employee") {
       res.status(403).json({ error: "Team Leads can only create Individual employee profiles." });
       return;
     }
     const creator = req.currentUser!;
-    if (creator.role === "Team Lead" && !Number.isSafeInteger(creator.teamId)) {
+    if (role === "Superadmin" && creator.role !== "Superadmin") {
+      res.status(403).json({ error: "Only a Superadmin can create another Superadmin." }); return;
+    }
+    if (creator.role === "Lead" && !Number.isSafeInteger(creator.teamId)) {
       res.status(403).json({ error: "Your account must be assigned to a team before creating employee profiles." });
       return;
     }
-    const assignedTeamId = creator.role === "Team Lead" ? creator.teamId! : typeof teamId === "number" ? teamId : null;
+    const assignedTeamId = creator.role === "Lead" ? creator.teamId! : typeof teamId === "number" ? teamId : null;
     if (assignedTeamId !== null && !(await listTeams(creator)).some((team) => team.id === assignedTeamId)) {
       res.status(400).json({ error: "Choose a team you are authorized to manage." });
       return;
+    }
+    const requestedDepartment = typeof department === "string" && department.trim() ? department.trim() : "Technical";
+    const departmentRecord = (await listDepartments()).find((item) => item.name.toLocaleLowerCase() === requestedDepartment.toLocaleLowerCase());
+    if (!departmentRecord || !departmentRecord.isActive) {
+      res.status(400).json({ error: "Choose an active department from the organization." }); return;
+    }
+    if (assignedTeamId !== null) {
+      const assignedTeam = (await listTeams(creator)).find((team) => team.id === assignedTeamId);
+      if (assignedTeam?.departmentName && assignedTeam.departmentName.toLocaleLowerCase() !== requestedDepartment.toLocaleLowerCase()) {
+        res.status(400).json({ error: "The selected team must belong to the selected department." }); return;
+      }
     }
     if (projectIds !== undefined && (!Array.isArray(projectIds) || projectIds.some((id) => !Number.isSafeInteger(id) || Number(id) < 1))) {
       res.status(400).json({ error: "Project assignments must be valid project IDs." });
@@ -315,7 +362,7 @@ app.post(
       email: email.trim().toLowerCase(),
       password,
       role: role as UserRole,
-      department: typeof department === "string" && department.trim() ? department.trim() : "Technical",
+      department: requestedDepartment,
       designation: typeof designation === "string" && designation.trim() ? designation.trim() : "Software Engineer",
       teamId: assignedTeamId,
       createdByUserId: creator.id,
@@ -341,6 +388,13 @@ app.patch(
       return;
     }
     const body = req.body as Record<string, unknown>;
+    if (body.role === "Superadmin" && req.currentUser?.role !== "Superadmin") {
+      res.status(403).json({ error: "Only a Superadmin can assign the Superadmin role." }); return;
+    }
+    const targetUser = await getUserById(id);
+    if (targetUser?.role === "Superadmin" && req.currentUser?.role !== "Superadmin") {
+      res.status(403).json({ error: "Only a Superadmin can modify a Superadmin account." }); return;
+    }
     const allowedFields = new Set(["name", "role", "teamId", "designation", "department"]);
     if (Object.keys(body).some((field) => !allowedFields.has(field))) {
       res.status(400).json({ error: "Account status must be changed through the safe deactivation endpoint." });
@@ -351,9 +405,9 @@ app.patch(
       return;
     }
     const target = await getUserById(id);
-    if (target?.role === "Admin" && target.isActive && body.role !== undefined && body.role !== "Admin") {
+    if (target?.role === "Admin" && target.isActive && body.role !== undefined && (body.role !== "Admin" && body.role !== "Superadmin")) {
       const admins = await listUsers();
-      if (admins.filter((user) => user.role === "Admin" && user.isActive).length <= 1) {
+      if (admins.filter((user) => (user.role === "Admin" || user.role === "Superadmin") && user.isActive).length <= 1) {
         res.status(409).json({ error: "The last active Admin cannot be changed to another role." });
         return;
       }
@@ -366,7 +420,7 @@ app.patch(
       department: typeof body.department === "string" ? body.department.trim() : undefined,
     }, req.currentUser!.id);
     if (!updated) {
-      if (target?.role === "Admin" && target.isActive && body.role !== undefined && body.role !== "Admin") {
+      if (target?.role === "Admin" && target.isActive && body.role !== undefined && (body.role !== "Admin" && body.role !== "Superadmin")) {
         res.status(409).json({ error: "The last active Admin cannot be changed to another role." });
         return;
       }
@@ -380,7 +434,7 @@ app.patch(
 app.patch(
   "/api/users/:id/deactivate",
   authMiddleware,
-  requireRole(["Admin", "Manager", "Team Lead"]),
+  requireRole(["Admin", "Lead", "Lead"]),
   asyncRoute(async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id < 1) {
@@ -439,6 +493,59 @@ app.patch(
 
 // ----------------- Teams APIs ----------------- //
 
+app.get("/api/departments", authMiddleware, requireRole(["Admin"]), asyncRoute(async (_req, res) => {
+  res.json(await listDepartments());
+}));
+
+app.post("/api/departments", authMiddleware, requireRole(["Admin"]), asyncRoute(async (req, res) => {
+  const { name, description, headUserId } = req.body as Record<string, unknown>;
+  if (typeof name !== "string" || !name.trim() || name.trim().length > 120) {
+    res.status(400).json({ error: "Department name is required and must be 120 characters or fewer." }); return;
+  }
+  if (typeof description === "string" && description.length > 2000) {
+    res.status(400).json({ error: "Department description must be 2,000 characters or fewer." }); return;
+  }
+  if (headUserId !== undefined && headUserId !== null && (!Number.isSafeInteger(headUserId) || (headUserId as number) < 1)) {
+    res.status(400).json({ error: "Choose a valid department head." }); return;
+  }
+  if (typeof headUserId === "number") {
+    const head = await getUserById(headUserId);
+    if (!head || !head.isActive) { res.status(400).json({ error: "Department head must be an active user." }); return; }
+  }
+  if ((await listDepartments()).some((department) => department.name.toLocaleLowerCase() === name.trim().toLocaleLowerCase())) {
+    res.status(409).json({ error: "A department with that name already exists." }); return;
+  }
+  const department = await createDepartment({ name: name.trim(), description: typeof description === "string" ? description.trim() : undefined, headUserId: typeof headUserId === "number" ? headUserId : null });
+  res.status(201).json(department);
+}));
+
+app.patch("/api/departments/:id", authMiddleware, requireRole(["Admin"]), asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) { res.status(400).json({ error: "Valid department ID required." }); return; }
+  const { name, description, headUserId, isActive } = req.body as Record<string, unknown>;
+  if (typeof isActive === "boolean" && name === undefined && description === undefined && headUserId === undefined) {
+    const result = await setDepartmentActive(id, isActive);
+    if (!result.ok) {
+      if ("members" in result) { res.status(409).json({ error: "Reassign or deactivate active department members and teams before deactivating this department.", ...result }); return; }
+      res.status(404).json({ error: "Department not found." }); return;
+    }
+    res.json({ success: true }); return;
+  }
+  if (typeof name !== "string" || !name.trim() || name.trim().length > 120) { res.status(400).json({ error: "Department name is required and must be 120 characters or fewer." }); return; }
+  if (typeof description === "string" && description.length > 2000) { res.status(400).json({ error: "Department description must be 2,000 characters or fewer." }); return; }
+  if (headUserId !== undefined && headUserId !== null && (!Number.isSafeInteger(headUserId) || (headUserId as number) < 1)) { res.status(400).json({ error: "Choose a valid department head." }); return; }
+  if (typeof headUserId === "number") {
+    const head = await getUserById(headUserId);
+    if (!head || !head.isActive) { res.status(400).json({ error: "Department head must be an active user." }); return; }
+  }
+  if ((await listDepartments()).some((department) => department.id !== id && department.name.toLocaleLowerCase() === name.trim().toLocaleLowerCase())) {
+    res.status(409).json({ error: "A department with that name already exists." }); return;
+  }
+  const department = await updateDepartment(id, { name: name.trim(), description: typeof description === "string" ? description.trim() : undefined, headUserId: typeof headUserId === "number" ? headUserId : null });
+  if (!department) { res.status(404).json({ error: "Department not found." }); return; }
+  res.json(department);
+}));
+
 app.get(
   "/api/teams",
   authMiddleware,
@@ -452,20 +559,43 @@ app.post(
   authMiddleware,
   requireRole(["Admin"]),
   asyncRoute(async (req, res) => {
-    const { name, description, managerId, leadId } = req.body as Record<string, unknown>;
+    const { name, description, managerId, leadId, departmentId } = req.body as Record<string, unknown>;
     if (!name || typeof name !== "string" || !name.trim()) {
       res.status(400).json({ error: "Team name is required." });
       return;
+    }
+    if (departmentId !== undefined && (!Number.isSafeInteger(departmentId) || (departmentId as number) < 1)) {
+      res.status(400).json({ error: "Choose a valid department." }); return;
+    }
+    if (typeof departmentId === "number") {
+      const departments = await listDepartments();
+      if (!departments.some((department) => department.id === departmentId && department.isActive)) {
+        res.status(400).json({ error: "Choose an active department." }); return;
+      }
     }
     const team = await createTeam({
       name: name.trim(),
       description: typeof description === "string" ? description.trim() : undefined,
       managerId: typeof managerId === "number" ? managerId : undefined,
       leadId: typeof leadId === "number" ? leadId : undefined,
+      departmentId: typeof departmentId === "number" ? departmentId : undefined,
     });
     res.status(201).json(team);
   }),
 );
+
+app.patch("/api/teams/:id", authMiddleware, requireRole(["Admin"]), asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1 || typeof req.body?.isActive !== "boolean") {
+    res.status(400).json({ error: "Provide a valid team ID and active status." }); return;
+  }
+  const result = await setTeamActive(id, req.body.isActive);
+  if (!result.ok) {
+    if ("openTaskCount" in result) { res.status(409).json({ error: `Reassign or complete the ${result.openTaskCount} open task(s) before deactivating this team.`, openTaskCount: result.openTaskCount }); return; }
+    res.status(404).json({ error: "Team not found." }); return;
+  }
+  res.json({ success: true });
+}));
 
 // ----------------- Projects APIs ----------------- //
 
@@ -480,7 +610,7 @@ app.get(
 app.post(
   "/api/projects",
   authMiddleware,
-  requireRole(["Admin", "Manager"]),
+  requireRole(["Admin", "Lead"]),
   asyncRoute(async (req, res) => {
     const { name, code, description, managerId, leadId, startDate, targetDate } = req.body as Record<string, unknown>;
     if (!name || typeof name !== "string" || !code || typeof code !== "string") {
@@ -489,16 +619,16 @@ app.post(
     }
     const actor = req.currentUser!;
     const selectedLead = typeof leadId === "number" ? await getUserById(leadId) : null;
-    if (typeof leadId === "number" && (!selectedLead || !selectedLead.isActive || !["Team Lead", "Manager"].includes(selectedLead.role))) {
+    if (typeof leadId === "number" && (!selectedLead || !selectedLead.isActive || !["Lead", "Lead"].includes(selectedLead.role))) {
       res.status(400).json({ error: "Choose an active Manager or Team Lead for the project." });
       return;
     }
-    if (actor.role !== "Admin" && selectedLead && selectedLead.teamId !== actor.teamId) {
+    if ((actor.role !== "Admin" && actor.role !== "Superadmin") && selectedLead && selectedLead.teamId !== actor.teamId) {
       res.status(403).json({ error: "Managers can assign projects only to leads in their authorized team." });
       return;
     }
-    const selectedManager = actor.role === "Admin" && typeof managerId === "number" ? await getUserById(managerId) : null;
-    if (typeof managerId === "number" && actor.role === "Admin" && (!selectedManager || !selectedManager.isActive || !["Admin", "Manager"].includes(selectedManager.role))) {
+    const selectedManager = (actor.role === "Admin" || actor.role === "Superadmin") && typeof managerId === "number" ? await getUserById(managerId) : null;
+    if (typeof managerId === "number" && (actor.role === "Admin" || actor.role === "Superadmin") && (!selectedManager || !selectedManager.isActive || !["Admin", "Lead"].includes(selectedManager.role))) {
       res.status(400).json({ error: "Choose an active Admin or Manager as project owner." });
       return;
     }
@@ -587,7 +717,7 @@ app.post(
   asyncRoute(async (req, res) => {
     const user = req.currentUser!;
     // Individual users cannot assign tasks unless they are admin/manager/lead
-    if (user.role === "Individual") {
+    if (user.role === "Employee") {
       res.status(403).json({ error: "Individual team members cannot create top-level task assignments." });
       return;
     }
@@ -613,6 +743,15 @@ app.post(
     if (!title || typeof title !== "string" || !projectId || typeof projectId !== "number" || !assignedToUserId || typeof assignedToUserId !== "number") {
       res.status(400).json({ error: "Task title, project ID, and primary assignee (assignedToUserId) are required." });
       return;
+    }
+    if (!isOptionalDateOnly(startDate) || !isOptionalDateOnly(dueDate) || (typeof startDate === "string" && startDate && typeof dueDate === "string" && dueDate && startDate > dueDate)) {
+      res.status(400).json({ error: "Task dates must be valid calendar dates, and the due date cannot be before the planned start date." }); return;
+    }
+    if (estimatedHours !== undefined && (typeof estimatedHours !== "number" || !Number.isFinite(estimatedHours) || estimatedHours < 0 || estimatedHours > 10000)) {
+      res.status(400).json({ error: "Estimated hours must be a number from 0 to 10,000." }); return;
+    }
+    if (!isSafeHttpUrl(repositoryUrl) || !isSafeHttpUrl(pullRequestUrl)) {
+      res.status(400).json({ error: "Related task links must be valid HTTP or HTTPS URLs of 2,048 characters or fewer." }); return;
     }
     if (!(await canAccessProject(user, projectId))) {
       res.status(404).json({ error: "Project not found." });
@@ -686,7 +825,7 @@ app.patch(
     const body = req.body as Record<string, unknown>;
 
     // Individual role restrictions
-    if (user.role === "Individual") {
+    if (user.role === "Employee") {
       if (task.assignedToUserId !== user.id) {
         res.status(403).json({ error: "You are not authorized to modify this task." });
         return;
@@ -716,6 +855,20 @@ app.patch(
     if (!Number.isSafeInteger(targetProjectId) || !(await canAccessProject(user, targetProjectId as number))) {
       res.status(404).json({ error: "Project not found." });
       return;
+    }
+    if (!isOptionalDateOnly(body.startDate) || !isOptionalDateOnly(body.dueDate)) {
+      res.status(400).json({ error: "Task dates must be valid calendar dates." }); return;
+    }
+    if (!isSafeHttpUrl(body.repositoryUrl) || !isSafeHttpUrl(body.pullRequestUrl)) {
+      res.status(400).json({ error: "Related task links must be valid HTTP or HTTPS URLs of 2,048 characters or fewer." }); return;
+    }
+    const plannedStart = body.startDate === undefined ? task.startDate : body.startDate;
+    const plannedDue = body.dueDate === undefined ? task.dueDate : body.dueDate;
+    if (typeof plannedStart === "string" && plannedStart && typeof plannedDue === "string" && plannedDue && plannedStart > plannedDue) {
+      res.status(400).json({ error: "The due date cannot be before the planned start date." }); return;
+    }
+    if (body.progressPercent !== undefined && (!Number.isInteger(body.progressPercent) || (body.progressPercent as number) < 0 || (body.progressPercent as number) > 100)) {
+      res.status(400).json({ error: "Progress must be a whole number from 0 to 100." }); return;
     }
     const targetAssigneeId = body.assignedToUserId === undefined ? task.assignedToUserId : body.assignedToUserId;
     if (!Number.isSafeInteger(targetAssigneeId) || !(await canAssignUserToProject(user, targetAssigneeId as number, targetProjectId as number))) {
@@ -773,7 +926,7 @@ app.post(
 
     // Must be assigned reviewer or Admin/Manager
     const isReviewer = task.reviewerUserId === user.id;
-    const isPrivileged = ["Admin", "Manager", "Team Lead"].includes(user.role);
+    const isPrivileged = ["Admin", "Lead", "Lead"].includes(user.role);
     if (!isReviewer && !isPrivileged) {
       res.status(403).json({ error: "Only the designated reviewer, manager, or admin can approve or request changes on this task." });
       return;
@@ -885,7 +1038,108 @@ app.patch(
   }),
 );
 
+// ----------------- Client Meetings APIs ----------------- //
+function validMeetingTimeZone(value: unknown): value is string {
+  try { if (typeof value !== "string" || value.length > 100) return false; new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; }
+}
+const meetingStatuses = ["Scheduled", "Completed", "Cancelled", "Rescheduled"] as const;
+const meetingTypes = ["Online", "In-person"] as const;
+const isMeetingAdmin = (user: User) => user.role === "Admin" || user.role === "Superadmin";
+async function canManageClientMeeting(meeting: NonNullable<Awaited<ReturnType<typeof getClientMeeting>>>, user: User) {
+  if (isMeetingAdmin(user) || meeting.organizerId === user.id) return true;
+  if (user.role !== "Lead") return false;
+  if (meeting.projectId && await canAccessProject(user, meeting.projectId)) return true;
+  const teamIds = new Set((await listTeams(user)).filter((team) => team.leadId === user.id || team.managerId === user.id).map((team) => team.id));
+  const relatedUserIds = [meeting.organizerId, ...meeting.participants.map((participant) => participant.id)];
+  if (meeting.taskId) {
+    const linkedTask = await getTaskById(meeting.taskId, user);
+    if (linkedTask) relatedUserIds.push(linkedTask.assignedToUserId);
+  }
+  for (const participantId of relatedUserIds) {
+    const participant = await getUserById(participantId);
+    if (participant?.teamId && teamIds.has(participant.teamId)) return true;
+  }
+  return false;
+}
+
+app.get("/api/client-meetings", authMiddleware, asyncRoute(async (req, res) => {
+  res.json(await listClientMeetings(req.currentUser!));
+}));
+app.get("/api/client-meetings/participants", authMiddleware, asyncRoute(async (req, res) => {
+  res.json(await listClientMeetingParticipants(req.currentUser!));
+}));
+app.get("/api/client-meetings/organizers", authMiddleware, asyncRoute(async (_req, res) => {
+  res.json(await listClientMeetingOrganizers());
+}));
+app.get("/api/client-meetings/departments", authMiddleware, asyncRoute(async (_req, res) => {
+  res.json(await listClientMeetingDepartments());
+}));
+app.post("/api/client-meetings", authMiddleware, asyncRoute(async (req, res) => {
+  const body = req.body as Record<string, unknown>;
+  const start = typeof body.startsAt === "string" ? Date.parse(body.startsAt) : NaN;
+  const end = typeof body.endsAt === "string" ? Date.parse(body.endsAt) : NaN;
+  const participants = Array.isArray(body.participantIds) && body.participantIds.every((value) => Number.isSafeInteger(value) && Number(value) > 0) ? [...new Set(body.participantIds as number[])] : [];
+  if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 160 || typeof body.clientName !== "string" || !body.clientName.trim() || body.clientName.length > 160 || !Number.isFinite(start) || !Number.isFinite(end) || end <= start || !validMeetingTimeZone(body.timeZone) || !meetingTypes.includes(body.meetingType as typeof meetingTypes[number]) || (body.meetingType === "Online" && (typeof body.meetingLink !== "string" || !body.meetingLink.trim())) || (body.meetingType === "In-person" && (typeof body.location !== "string" || !body.location.trim()))) { res.status(400).json({ error: "Provide required meeting details, a valid time zone and date/time, and a meeting link or location." }); return; }
+  const allowed = new Set((await listClientMeetingParticipants(req.currentUser!)).filter((person) => person.isActive).map((person) => person.id));
+  if (participants.some((participantId) => !allowed.has(participantId))) { res.status(403).json({ error: "One or more participants are outside your authorized portal users." }); return; }
+  const organizerId = Number(body.organizerId);
+  if (!Number.isSafeInteger(organizerId) || !(await listClientMeetingOrganizers()).some((person) => person.id === organizerId)) { res.status(403).json({ error: "Choose an active portal user as organizer." }); return; }
+  const projectId = typeof body.projectId === "number" ? body.projectId : null;
+  const taskId = typeof body.taskId === "number" ? body.taskId : null;
+  if (projectId && !(await canAccessProject(req.currentUser!, projectId))) { res.status(403).json({ error: "You cannot link this meeting to that project." }); return; }
+  if (taskId && !(await getTaskById(taskId, req.currentUser!))) { res.status(403).json({ error: "You cannot link this meeting to that task." }); return; }
+  if (typeof body.departmentId === "number" && !(await listDepartments()).some((department) => department.id === body.departmentId && department.isActive)) { res.status(400).json({ error: "Choose an active department." }); return; }
+  const meeting = await createClientMeeting({ title: body.title.trim(), clientName: body.clientName.trim(), clientContact: typeof body.clientContact === "string" ? body.clientContact.trim() : undefined, startsAt: new Date(start).toISOString(), endsAt: new Date(end).toISOString(), timeZone: body.timeZone, meetingType: body.meetingType as "Online" | "In-person", meetingLink: typeof body.meetingLink === "string" ? body.meetingLink.trim() : undefined, location: typeof body.location === "string" ? body.location.trim() : undefined, agenda: typeof body.agenda === "string" ? body.agenda : "", description: typeof body.description === "string" ? body.description : "", organizerId, departmentId: typeof body.departmentId === "number" ? body.departmentId : null, projectId, taskId, participantIds: participants });
+  res.status(201).json(meeting);
+}));
+app.patch("/api/client-meetings/:id", authMiddleware, asyncRoute(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id < 1) { res.status(400).json({ error: "Valid meeting ID required." }); return; }
+  const current = await getClientMeeting(id);
+  if (!current) { res.status(404).json({ error: "Meeting not found." }); return; }
+  const actor = req.currentUser!;
+  const canManage = await canManageClientMeeting(current, actor);
+  const participant = current.participants.some((person) => person.id === actor.id);
+  if (!canManage && !participant) { res.status(403).json({ error: "You are not authorized to access this meeting." }); return; }
+  const body = req.body as Record<string, unknown>;
+  const notesOnly = !canManage;
+  const notes = ["minutes", "decisions", "clientFeedback", "actionItems", "resultingTaskId", "followUpAssigneeId", "followUpDeadline", "status"];
+  const editable = ["title", "clientName", "clientContact", "startsAt", "endsAt", "timeZone", "meetingType", "meetingLink", "location", "agenda", "description", "organizerId", "departmentId", "projectId", "taskId", "participantIds", ...notes];
+  if (Object.keys(body).some((key) => !(notesOnly ? notes : editable).includes(key))) { res.status(403).json({ error: "You cannot edit those meeting details." }); return; }
+  if (body.organizerId !== undefined) {
+    const allowedOrganizerIds = new Set((await listClientMeetingOrganizers()).map((person) => person.id));
+    if (!Number.isSafeInteger(body.organizerId) || !allowedOrganizerIds.has(Number(body.organizerId))) { res.status(403).json({ error: "Choose an active portal user as organizer." }); return; }
+  }
+  const startsAt = body.startsAt === undefined ? current.startsAt : body.startsAt;
+  const endsAt = body.endsAt === undefined ? current.endsAt : body.endsAt;
+  const startMs = typeof startsAt === "string" ? Date.parse(startsAt) : NaN;
+  const endMs = typeof endsAt === "string" ? Date.parse(endsAt) : NaN;
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs || !validMeetingTimeZone(body.timeZone ?? current.timeZone) || (body.status !== undefined && !meetingStatuses.includes(body.status as typeof meetingStatuses[number]))) { res.status(400).json({ error: "Meeting date, time, time zone, or status is invalid." }); return; }
+  if (body.participantIds !== undefined) {
+    if (!Array.isArray(body.participantIds) || !body.participantIds.every((value) => Number.isSafeInteger(value) && Number(value) > 0)) { res.status(400).json({ error: "Choose valid internal participants." }); return; }
+    const allowed = new Set((await listClientMeetingParticipants(actor)).filter((person) => person.isActive).map((person) => person.id));
+    if (body.participantIds.some((participantId) => !allowed.has(participantId as number))) { res.status(403).json({ error: "One or more participants are outside your authorized portal users." }); return; }
+  }
+  if (typeof body.projectId === "number" && !(await canAccessProject(actor, body.projectId))) { res.status(403).json({ error: "You cannot link this meeting to that project." }); return; }
+  if (typeof body.departmentId === "number" && !(await listClientMeetingDepartments()).some((department) => department.id === body.departmentId)) { res.status(400).json({ error: "Choose an active department." }); return; }
+  if (typeof body.taskId === "number" && !(await getTaskById(body.taskId, actor))) { res.status(403).json({ error: "You cannot link this meeting to that task." }); return; }
+  if (typeof body.resultingTaskId === "number" && !(await getTaskById(body.resultingTaskId, actor))) { res.status(403).json({ error: "You cannot link this meeting to that task." }); return; }
+  if (typeof body.followUpAssigneeId === "number" && !(await listClientMeetingParticipants(actor)).some((person) => person.id === body.followUpAssigneeId && person.isActive)) { res.status(403).json({ error: "Choose an active employee in your authorized scope." }); return; }
+  if (typeof body.followUpDeadline === "string" && !/^\d{4}-\d{2}-\d{2}$/.test(body.followUpDeadline)) { res.status(400).json({ error: "Follow-up deadline must be a date." }); return; }
+  const result = await updateClientMeeting(id, { ...body, startsAt: body.startsAt === undefined ? undefined : new Date(startMs).toISOString(), endsAt: body.endsAt === undefined ? undefined : new Date(endMs).toISOString() } as Parameters<typeof updateClientMeeting>[1]);
+  res.json(result);
+}));
+
 // ----------------- Notifications APIs ----------------- //
+
+app.get("/api/notifications/preferences", authMiddleware, asyncRoute(async (req, res) => {
+  res.json(await getClientMeetingPreferences(req.currentUser!.id));
+}));
+app.patch("/api/notifications/preferences", authMiddleware, asyncRoute(async (req, res) => {
+  const { clientMeetings, meetingReminders } = req.body as Record<string, unknown>;
+  if (typeof clientMeetings !== "boolean" || typeof meetingReminders !== "boolean") { res.status(400).json({ error: "Choose valid meeting notification preferences." }); return; }
+  res.json(await updateClientMeetingPreferences(req.currentUser!.id, clientMeetings, meetingReminders));
+}));
 
 app.get(
   "/api/notifications",
@@ -934,7 +1188,7 @@ app.get(
 app.get(
   "/api/activity",
   authMiddleware,
-  requireRole(["Admin", "Manager", "Team Lead"]),
+  requireRole(["Admin", "Lead", "Lead"]),
   asyncRoute(async (req, res) => {
     res.json(await listOrganizationActivity(req.currentUser!));
   }),
@@ -943,7 +1197,7 @@ app.get(
 app.delete(
   "/api/activity/:id",
   authMiddleware,
-  requireRole(["Admin", "Team Lead"]),
+  requireRole(["Admin", "Lead"]),
   asyncRoute(async (req, res) => {
     const rawId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const match = /^(task|project|employee)-([1-9]\d*)$/.exec(rawId);
@@ -1350,6 +1604,12 @@ app.use(errorHandler);
 
 try {
   await initializeDatabase();
+  void runTaskDeadlineReminderSweep().catch((error) => console.error("Initial deadline reminder check failed:", error));
+  void runClientMeetingReminderSweep().catch((error) => console.error("Initial client meeting reminder check failed:", error));
+  setInterval(() => {
+    void runTaskDeadlineReminderSweep().catch((error) => console.error("Deadline reminder check failed:", error));
+    void runClientMeetingReminderSweep().catch((error) => console.error("Client meeting reminder check failed:", error));
+  }, 5 * 60 * 1000);
   app.listen(port, "127.0.0.1", () => {
     console.log(`API ready at http://127.0.0.1:${port}`);
   });
